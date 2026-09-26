@@ -257,13 +257,21 @@ def build_email_html(results, shadow_results, active_strategy_name, watchlist):
         html += '</ul>'
     if not triggered_found:
         html += '<p>无标的触发信号</p>'
-    html += '<hr><h3>⏳ 未触发信号的标的</h3><ul>'
+    html += '<hr><h3>⏳ 未触发信号的标的（详情查看）</h3><ul>'
     for r in results:
         if r.get("status") != "ok":
             html += f'<li>{r["symbol"]}：{r.get("status")}</li>'
         elif not r.get("strategy_result", {}).get("triggered"):
             sr = r.get("strategy_result", {})
-            html += f'<li>{r["symbol"]}：等待中（A {sr.get("track_a", {}).get("score", 0)}/3，B {sr.get("track_b", {}).get("score", 0)}/3）</li>'
+            ta = sr.get("track_a", {})
+            tb = sr.get("track_b", {})
+            html += f'<li><b>{r["symbol"]}</b>：等待中（A {ta.get("score", 0)}/3，B {tb.get("score", 0)}/3）'
+            html += '<ul style="color:#666; font-size:0.9em; margin-top:4px;">'
+            for k, v in ta.get("details", {}).items():
+                html += f'<li>{k}: {v}</li>'
+            for k, v in tb.get("details", {}).items():
+                html += f'<li>{k}: {v}</li>'
+            html += '</ul></li>'
     html += '</ul>'
     if shadow_results:
         html += '<hr><h3>🔬 影子策略观察</h3><ul>'
