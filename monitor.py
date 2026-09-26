@@ -12,22 +12,32 @@ GATEIO_FUTURES_KLINE_URL = "https://api.gateio.ws/api/v4/futures/usdt/candlestic
 GATEIO_FUTURES_FUNDING_URL = "https://api.gateio.ws/api/v4/futures/usdt/funding_rate"
 BJT = timezone(timedelta(hours=8))
 
-# ================= Hyperliquid 接口 =================
+# ================= Hyperliquid 接口（带重试） =================
 def hyperliquid_post(payload: dict) -> dict:
-    try:
-        resp = requests.post(HYPERLIQUID_INFO_URL, json=payload, timeout=15, headers={"Content-Type": "application/json"})
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        log.warning(f"Hyperliquid API 请求失败: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            resp = requests.post(HYPERLIQUID_INFO_URL, json=payload, timeout=15, headers={"Content-Type": "application/json"})
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            log.warning(f"Hyperliquid API 请求失败 (第{attempt+1}次重试): {e}")
+            time.sleep(2)
+    return None
 
-def fetch_hyperliquid_klines(symbol: str, interval: str = "30m", limit: int = 300):
+def fetch_hyperliquid_klines(symbol: str, interval: str = "30m", limit: int = 150):
+    # 修复：限制K线数量为150根，降低API负载和限流风险
     coin = symbol.replace("_USDT", "").replace("-USDT", "").replace("USDT", "")
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - (limit * 30 * 60 * 1000)
     data = hyperliquid_post({"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start_ms, "endTime": now_ms}})
-    if not data or not isinstance(data, list): return None
+    
+    if not data:
+        log.warning(f"[{symbol}] Hyperliquid 返回空数据")
+        return None
+    if not isinstance(data, list):
+        log.warning(f"[{symbol}] Hyperliquid 返回格式错误: {data}")
+        return None
+        
     klines = [{"timestamp": item["t"], "open": float(item["o"]), "high": float(item["h"]), "low": float(item["l"]), "close": float(item["c"]), "volume": float(item["v"])} for item in data]
     log.info(f"Hyperliquid K线获取成功: {symbol}, 共 {len(klines)} 根")
     return klines
@@ -40,14 +50,13 @@ def fetch_hyperliquid_funding(symbol: str):
         meta, ctxs = data[0], data[1]
         for i, asset in enumerate(meta.get("universe", [])):
             if asset.get("name", "").upper() == coin.upper():
-                # Hyperliquid 的 funding 通常是以百分比形式返回（如 0.01 代表 0.01%）
                 return float(ctxs[i].get("funding", 0))
     except Exception as e:
         log.warning(f"Hyperliquid 资金费率解析失败: {e}")
     return None
 
-# ================= Gate.io 接口（备用） =================
-def fetch_gateio_futures_klines(symbol: str, interval: str = "30m", limit: int = 300):
+# ================= Gate.io 接口（备用降级，带详细报错） =================
+def fetch_gateio_futures_klines(symbol: str, interval: str = "30m", limit: int = 150):
     params = {"contract": symbol, "interval": interval, "limit": limit}
     try:
         resp = requests.get(GATEIO_FUTURES_KLINE_URL, params=params, timeout=15)
@@ -58,8 +67,14 @@ def fetch_gateio_futures_klines(symbol: str, interval: str = "30m", limit: int =
         klines = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]), "close": float(item[2]), "high": float(item[3]), "low": float(item[4]), "open": float(item[5])} for item in data]
         log.info(f"Gate.io合约K线获取成功: {symbol}, 共 {len(klines)} 根")
         return klines
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            log.warning(f"[{symbol}] Gate.io 合约API 403 Forbidden（GitHub美国IP被封锁），降级失败")
+        else:
+            log.warning(f"[{symbol}] Gate.io 合约K线请求失败: {e}")
+        return None
     except Exception as e:
-        log.warning(f"Gate.io合约K线请求失败: {symbol}, {e}")
+        log.warning(f"[{symbol}] Gate.io 合约K线请求异常: {e}")
         return None
 
 def fetch_gateio_futures_funding(symbol: str):
@@ -69,7 +84,6 @@ def fetch_gateio_futures_funding(symbol: str):
         resp.raise_for_status()
         data = resp.json()
         if data and len(data) > 0:
-            # Gate.io 的 "r" 字段通常是小数形式（如 0.0001 代表 0.01%），统一转为百分比
             rate = float(data[0].get("r", 0))
             return rate * 100 if rate < 1 else rate
     except Exception as e:
@@ -96,11 +110,11 @@ def calc_rsi(klines, period=14):
     if losses == 0: return 100
     return 100 - (100 / (1 + (gains / losses)))
 
-def find_recent_high(klines, lookback=299):
+def find_recent_high(klines, lookback=149):
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return max(k["high"] for k in subset)
 
-def find_recent_low(klines, lookback=299):
+def find_recent_low(klines, lookback=149):
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return min(k["low"] for k in subset)
 
@@ -124,6 +138,7 @@ def build_market_data(symbol, asset_type):
     else:
         log.warning(f"[{symbol}] Hyperliquid 获取失败，尝试降级到 Gate.io")
         # 2. 降级到 Gate.io
+        time.sleep(1) # 降级前也加一点延迟
         klines = fetch_gateio_futures_klines(symbol)
         if klines:
             source = "Gate.io 合约(降级)"
@@ -159,6 +174,9 @@ def main():
         log.info(f"=== 处理 {symbol} ({asset_type}) ===")
         market_data = build_market_data(symbol, asset_type)
         
+        # 关键修复：每个币种处理完，强制休眠1秒，防止被Hyperliquid限流
+        time.sleep(1.5)
+        
         if market_data["fetch_status"] != "ok":
             all_results.append({"symbol": symbol, "asset_type": asset_type, "status": market_data["fetch_status"], "strategy_result": None})
             continue
@@ -189,7 +207,7 @@ def build_email_html(results, active_strategy_name, watchlist):
     
     for r in results:
         if r.get("status") == "unsupported":
-            html += f'<p style="color:#999;">⏳ <b>{r["symbol"]}</b> — Hyperliquid与Gate.io均未上线，暂不支持监控</p>'
+            html += f'<p style="color:#999;">⏳ <b>{r["symbol"]}</b> — Hyperliquid与Gate.io均无数据，暂不支持监控</p>'
             continue
         if r.get("status") != "ok":
             html += f'<p style="color:#999;">🎯 <b>{r["symbol"]}</b> — 数据失败（{r.get("status")}）</p>'; continue
@@ -231,7 +249,7 @@ def build_email_html(results, active_strategy_name, watchlist):
     html += '<h3>⏳ 未触发标的详情</h3><ul>'
     for r in results:
         if r.get("status") == "unsupported": 
-            html += f'<li>{r["symbol"]}：暂不支持（Hyperliquid与Gate.io均无数据）</li>'
+            html += f'<li>{r["symbol"]}：暂不支持（数据源均无数据）</li>'
         elif r.get("status") != "ok": 
             html += f'<li>{r["symbol"]}：{r.get("status")}</li>'
         elif not r.get("strategy_result", {}).get("triggered"):
