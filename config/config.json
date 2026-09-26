@@ -4,7 +4,7 @@
   "notify_on_no_signal": true,
   "watchlist": [
     {
-      "symbol": "NEAR_USDT",
+      "symbol": "牛来_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
