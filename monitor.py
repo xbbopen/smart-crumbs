@@ -23,6 +23,9 @@ def hyperliquid_post(payload: dict) -> dict:
 
 def fetch_hyperliquid_klines(symbol: str, interval: str = "30m", limit: int = 300):
     """获取300根K线，约6天数据，解决时间窗口过短的问题"""
+    if not symbol.isascii():
+        log.warning(f"[{symbol}] 包含非ASCII字符（中文），Hyperliquid 暂不支持，跳过K线获取")
+        return None
     coin = symbol.replace("_USDT", "").replace("-USDT", "").replace("USDT", "")
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - (limit * 30 * 60 * 1000)
@@ -103,20 +106,27 @@ def build_market_data(symbol, asset_type):
             "data_source": "爬虫(币安)+Hyperliquid"
         })
         
-        # 4. 资金费率：优先用爬虫抓的币安费率
+        # ===== 资金费率：优先使用爬虫数据，兜底用 Hyperliquid =====
         if crawled and crawled.get("funding_rate") is not None:
             market_data["funding_rate"] = crawled["funding_rate"]
+            log.info(f"[{symbol}] 使用爬虫资金费率: {crawled['funding_rate']}%")
         else:
-            # 降级到Hyperliquid（邮件中会警告）
-            funding_data = hyperliquid_post({"type": "metaAndAssetCtxs"})
-            if funding_data:
-                try:
-                    coin = symbol.replace("_USDT", "").upper()
-                    for i, asset in enumerate(funding_data[0].get("universe", [])):
-                        if asset.get("name", "").upper() == coin:
-                            market_data["funding_rate"] = float(funding_data[1][i].get("funding", 0))
-                            break
-                except Exception: pass
+            # === 新增：如果是中文符号，跳过 Hyperliquid 兜底 ===
+            if not symbol.isascii():
+                log.warning(f"[{symbol}] 中文符号，Hyperliquid 不支持，资金费率留空")
+            else:
+                log.warning(f"[{symbol}] 爬虫资金费率获取失败，尝试 Hyperliquid 兜底")
+                funding_data = hyperliquid_post({"type": "metaAndAssetCtxs"})
+                if funding_data:
+                    try:
+                        coin = symbol.replace("_USDT", "").upper()
+                        for i, asset in enumerate(funding_data[0].get("universe", [])):
+                            if asset.get("name", "").upper() == coin:
+                                market_data["funding_rate"] = float(funding_data[1][i].get("funding", 0))
+                                log.info(f"[{symbol}] 使用 Hyperliquid 资金费率: {market_data['funding_rate']}%")
+                                break
+                    except Exception as e:
+                        log.error(f"[{symbol}] 资金费率解析失败: {e}")
 
     elif asset_type == "spot":
         klines = fetch_gateio_spot_klines(symbol)
