@@ -1,6 +1,6 @@
 from strategies.base import BaseStrategy
 
-class Strategy(BaseStrategy):
+class V1DefaultStrategy(BaseStrategy):
     version = "v1_default"
     name = "默认双轨策略"
 
@@ -18,7 +18,7 @@ class Strategy(BaseStrategy):
             result["track_a"]["details"]["数据状态"] = "数据不足"
             return result
 
-        # 轨道A
+        # ================= 轨道A：见顶做空 =================
         if rh and price >= rh * 0.97:
             result["track_a"]["score"] += 1
             result["track_a"]["details"]["A1-逼近高点"] = f"现价{price}，高点{rh}"
@@ -43,7 +43,7 @@ class Strategy(BaseStrategy):
         else:
             result["track_a"]["details"]["A4-形态走弱"] = "未出现明显顶部"
 
-        # 轨道B
+        # ================= 轨道B：暴跌抄底 =================
         if rh and price <= rh * 0.85:
             result["track_b"]["score"] += 1
             result["track_b"]["details"]["B1-大幅回撤"] = f"回撤{((rh-price)/rh*100):.1f}%"
@@ -62,7 +62,7 @@ class Strategy(BaseStrategy):
         else:
             result["track_b"]["details"]["B3-低于MA10"] = "未满足"
 
-        # 触发
+        # 触发判定
         if result["track_a"]["score"] >= 3:
             result["triggered"], result["direction"] = True, "short"
         elif result["track_b"]["score"] >= 3:
