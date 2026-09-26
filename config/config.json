@@ -4,7 +4,7 @@
   "notify_on_no_signal": true,
   "watchlist": [
     {
-      "symbol": "AMP_USDT",
+      "symbol": "Q_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
