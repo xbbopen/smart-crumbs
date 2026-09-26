@@ -4,13 +4,18 @@
   "notify_on_no_signal": true,
   "watchlist": [
     {
-      "symbol": "ZEC_USDT",
+      "symbol": "BTC_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
     {
-      "symbol": "BTC_USDT",
-      "type": "futures",
+      "symbol": "牛来_USDT",
+      "type": "spot",
+      "strategy": "v1_default"
+    },
+    {
+      "symbol": "NEAR_USDT",
+      "type": "spot",
       "strategy": "v1_default"
     },
     {
