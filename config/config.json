@@ -19,7 +19,7 @@
       "strategy": "v1_default"
     },
     {
-      "symbol": "ZEC_USDT",
+      "symbol": "BR_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
@@ -29,7 +29,7 @@
       "strategy": "v1_default"
     },
     {
-      "symbol": "ENA_USDT",
+      "symbol": "CLANKER_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
