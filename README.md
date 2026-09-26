@@ -228,5 +228,3 @@ python monitor.py
 ```
 
 ---
-
-MIT License. 本项目仅供学习和数据监控使用。
