@@ -4,12 +4,12 @@
   "notify_on_no_signal": true,
   "watchlist": [
     {
-      "symbol": "BTC_USDT",
+      "symbol": "AMP_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
     {
-      "symbol": "XAU_USDT",
+      "symbol": "TAK_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
