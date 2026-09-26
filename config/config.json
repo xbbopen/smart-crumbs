@@ -4,12 +4,27 @@
   "notify_on_no_signal": true,
   "watchlist": [
     {
-      "symbol": "Q_USDT",
+      "symbol": "ETC_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
     {
-      "symbol": "TAK_USDT",
+      "symbol": "ETH_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
+      "symbol": "SOL_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
+      "symbol": "ZEC_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
+      "symbol": "ENA_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
