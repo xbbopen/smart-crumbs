@@ -340,10 +340,25 @@ def main():
             })
             continue
 
-        result = active_strategy.evaluate(symbol, asset_type, market_data)
+                try:
+            result = active_strategy.evaluate(symbol, asset_type, market_data)
+        except Exception as e:
+            log.error(f"[{symbol}] 策略评估发生异常: {e}")
+            result = None
+
+        if result is None:
+            log.warning(f"[{symbol}] 策略返回值为空，跳过。请检查 v1_default.py")
+            all_results.append({
+                "symbol": symbol, "asset_type": asset_type,
+                "status": "strategy_error", "strategy_result": None,
+            })
+            continue
+
+        ta = result.get('track_a', {})
+        tb = result.get('track_b', {})
         log.info(f"[{symbol}] 策略结果: 状态={market_data['fetch_status']}, "
-                 f"轨道A={result.get('track_a', {}).get('score', 'N/A')}, "
-                 f"轨道B={result.get('track_b', {}).get('score', 'N/A')}")
+                 f"轨道A={ta.get('score', 'N/A')}, "
+                 f"轨道B={tb.get('score', 'N/A')}")
 
         all_results.append({
             "symbol": symbol, "asset_type": asset_type,
