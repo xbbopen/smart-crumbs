@@ -9,37 +9,12 @@
       "strategy": "v1_default"
     },
     {
-      "symbol": "PLAY_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "NEAR_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "ZEC_USDT",
+      "symbol": "XAU_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
     {
       "symbol": "ARK_USDT",
-      "type": "spot",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "NOM_USDT",
-      "type": "spot",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "ZEC_USDT",
-      "type": "spot",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "BTC_USDT",
       "type": "spot",
       "strategy": "v1_default"
     },
