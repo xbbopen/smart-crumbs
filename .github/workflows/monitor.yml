@@ -2,7 +2,7 @@ name: 多标的合约监控
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       strategy_override:
