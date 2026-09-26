@@ -19,6 +19,11 @@
       "strategy": "v1_default"
     },
     {
+      "symbol": "ZEC_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
       "symbol": "ARK_USDT",
       "type": "spot",
       "strategy": "v1_default"
