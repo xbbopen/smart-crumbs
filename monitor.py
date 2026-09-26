@@ -3,13 +3,11 @@ from datetime import datetime, timezone, timedelta
 import requests
 from email_sender import send_html_email
 from strategies.loader import load_strategy
-from crawler import fetch_price_and_funding_via_crawler
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
 log = logging.getLogger(__name__)
 
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
-GATEIO_SPOT_KLINE_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
 BJT = timezone(timedelta(hours=8))
 
 def hyperliquid_post(payload: dict) -> dict:
@@ -22,10 +20,7 @@ def hyperliquid_post(payload: dict) -> dict:
         return None
 
 def fetch_hyperliquid_klines(symbol: str, interval: str = "30m", limit: int = 300):
-    """获取300根K线，约6天数据，解决时间窗口过短的问题"""
-    if not symbol.isascii():
-        log.warning(f"[{symbol}] 包含非ASCII字符（中文），Hyperliquid 暂不支持，跳过K线获取")
-        return None
+    """获取300根K线，约6天数据"""
     coin = symbol.replace("_USDT", "").replace("-USDT", "").replace("USDT", "")
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - (limit * 30 * 60 * 1000)
@@ -35,18 +30,20 @@ def fetch_hyperliquid_klines(symbol: str, interval: str = "30m", limit: int = 30
     log.info(f"Hyperliquid K线获取成功: {symbol}, 共 {len(klines)} 根")
     return klines
 
-def fetch_gateio_spot_klines(symbol: str, interval: str = "30m", limit: int = 300):
+def fetch_hyperliquid_funding(symbol: str):
+    coin = symbol.replace("_USDT", "").replace("-USDT", "").replace("USDT", "")
+    data = hyperliquid_post({"type": "metaAndAssetCtxs"})
+    if not data: return None
     try:
-        resp = requests.get(GATEIO_SPOT_KLINE_URL, params={"currency_pair": symbol, "interval": interval, "limit": limit}, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if not data: return None
-        return [{"timestamp": int(item[0]) * 1000, "close": float(item[2]), "high": float(item[3]), "low": float(item[4]), "open": float(item[5]), "volume": float(item[1])} for item in data]
+        meta, ctxs = data[0], data[1]
+        for i, asset in enumerate(meta.get("universe", [])):
+            if asset.get("name", "").upper() == coin.upper():
+                ctx = ctxs[i] if i < len(ctxs) else {}
+                return {"funding_rate": float(ctx.get("funding", 0)), "open_interest": float(ctx.get("openInterest", 0))}
     except Exception as e:
-        log.error(f"Gate.io 现货API请求失败: {e}")
-        return None
+        log.error(f"Hyperliquid 资金费率解析失败: {e}")
+    return None
 
-# 技术指标
 def calc_ma(klines, period=10):
     if len(klines) < period: return None
     return sum(k["close"] for k in klines[-period:]) / period
@@ -67,78 +64,32 @@ def calc_rsi(klines, period=14):
     return 100 - (100 / (1 + (gains / losses)))
 
 def find_recent_high(klines, lookback=299):
-    """排除当前未收盘K线，寻找真实区间高点"""
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return max(k["high"] for k in subset)
 
 def find_recent_low(klines, lookback=299):
-    """排除当前未收盘K线，寻找真实区间低点"""
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return min(k["low"] for k in subset)
 
 def build_market_data(symbol, asset_type):
     market_data = {"symbol": symbol, "asset_type": asset_type, "fetch_status": "ok", "klines": None, "current_price": None, "funding_rate": None, "ma10": None, "atr": None, "rsi": None, "recent_high": None, "recent_low": None}
     
-    if asset_type == "futures":
-        # 1. 爬虫抓取币安价格和费率
-        crawled = fetch_price_and_funding_via_crawler(symbol)
-        # 2. Hyperliquid获取历史K线
-        klines = fetch_hyperliquid_klines(symbol)
-        if not klines:
-            market_data["fetch_status"] = "fetch_failed"
-            return market_data
-            
-        # 3. 用爬虫结果更新最后一根K线
-        if crawled and crawled.get("current_price"):
-            price = crawled["current_price"]
-            klines[-1]["close"] = price
-            klines[-1]["high"] = max(klines[-1]["high"], price)
-            klines[-1]["low"] = min(klines[-1]["low"], price)
-            log.info(f"[{symbol}] 爬虫价格已覆盖: {price}")
-        else:
-            log.warning(f"[{symbol}] 爬虫价格获取失败，使用Hyperliquid价格")
-            
-        market_data.update({
-            "klines": klines, "current_price": klines[-1]["close"],
-            "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
-            "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines),
-            "recent_low": find_recent_low(klines),
-            "data_source": "爬虫(币安)+Hyperliquid"
-        })
+    klines = fetch_hyperliquid_klines(symbol)
+    if not klines:
+        market_data["fetch_status"] = "fetch_failed"
+        return market_data
         
-        # ===== 资金费率：优先使用爬虫数据，兜底用 Hyperliquid =====
-        if crawled and crawled.get("funding_rate") is not None:
-            market_data["funding_rate"] = crawled["funding_rate"]
-            log.info(f"[{symbol}] 使用爬虫资金费率: {crawled['funding_rate']}%")
-        else:
-            # === 新增：如果是中文符号，跳过 Hyperliquid 兜底 ===
-            if not symbol.isascii():
-                log.warning(f"[{symbol}] 中文符号，Hyperliquid 不支持，资金费率留空")
-            else:
-                log.warning(f"[{symbol}] 爬虫资金费率获取失败，尝试 Hyperliquid 兜底")
-                funding_data = hyperliquid_post({"type": "metaAndAssetCtxs"})
-                if funding_data:
-                    try:
-                        coin = symbol.replace("_USDT", "").upper()
-                        for i, asset in enumerate(funding_data[0].get("universe", [])):
-                            if asset.get("name", "").upper() == coin:
-                                market_data["funding_rate"] = float(funding_data[1][i].get("funding", 0))
-                                log.info(f"[{symbol}] 使用 Hyperliquid 资金费率: {market_data['funding_rate']}%")
-                                break
-                    except Exception as e:
-                        log.error(f"[{symbol}] 资金费率解析失败: {e}")
-
-    elif asset_type == "spot":
-        klines = fetch_gateio_spot_klines(symbol)
-        if not klines:
-            market_data["fetch_status"] = "fetch_failed"
-            return market_data
-        market_data.update({
-            "klines": klines, "current_price": klines[-1]["close"],
-            "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
-            "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines),
-            "recent_low": find_recent_low(klines), "data_source": "Gate.io 现货"
-        })
+    market_data.update({
+        "klines": klines, "current_price": klines[-1]["close"],
+        "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
+        "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines),
+        "recent_low": find_recent_low(klines), "data_source": "Hyperliquid"
+    })
+    
+    funding_data = fetch_hyperliquid_funding(symbol)
+    if funding_data:
+        market_data["funding_rate"] = funding_data.get("funding_rate")
+        
     return market_data
 
 def main():
@@ -173,7 +124,7 @@ def main():
 
 def build_email_html(results, active_strategy_name, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
-    html = f"<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:0 auto;'><h2>📊 多类型标的 双轨监控报告</h2><p><b>时间：</b>{now} (北京时间)</p><p><b>策略：</b>{active_strategy_name}</p><hr>"
+    html = f"<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:0 auto;'><h2>📊 三轨并行监控报告</h2><p><b>时间：</b>{now} (北京时间)</p><p><b>策略：</b>{active_strategy_name} | <b>数据源：</b>Hyperliquid</p><hr>"
     html += '<h3>🚨 触发信号详情</h3>'
     triggered_found = False
     for r in results:
@@ -183,10 +134,18 @@ def build_email_html(results, active_strategy_name, watchlist):
         if not sr.get("triggered"): continue
         triggered_found = True
         md = r.get("market_data", {})
-        html += f'<p style="font-size:1.1em;"><b>🎯 {r["symbol"]}</b> ({r.get("asset_type")}) | 当前价：${r.get("current_price"):.4f} | 数据源：{md.get("data_source")}</p>'
-        ta, tb = sr.get("track_a", {}), sr.get("track_b", {})
-        html += f'<p>🟥 轨道A(做空)：{ta.get("score", 0)}/4</p><ul>' + "".join(f"<li>{k}: {v}</li>" for k, v in ta.get("details", {}).items()) + '</ul>'
-        html += f'<p>🟩 轨道B(做多)：{tb.get("score", 0)}/3</p><ul>' + "".join(f"<li>{k}: {v}</li>" for k, v in tb.get("details", {}).items()) + '</ul>'
+        html += f'<p style="font-size:1.1em;"><b>🎯 {r["symbol"]}</b> | 当前价：${r.get("current_price"):.4f} | 数据源：{md.get("data_source")}</p>'
+        
+        # 根据方向输出不同轨道
+        if sr.get("direction") == "short":
+            ta = sr.get("track_2", {})
+            html += f'<p>🟥 轨道2（见顶做空）：{ta.get("score", 0)}/4</p><ul>' + "".join(f"<li>{k}: {v}</li>" for k, v in ta.get("details", {}).items()) + '</ul>'
+        elif sr.get("direction") == "long_trend":
+            ta = sr.get("track_1", {})
+            html += f'<p>🟩 轨道1（底部突破）：{ta.get("score", 0)}/4</p><ul>' + "".join(f"<li>{k}: {v}</li>" for k, v in ta.get("details", {}).items()) + '</ul>'
+        elif sr.get("direction") == "long_rebound":
+            ta = sr.get("track_3", {})
+            html += f'<p>🟩 轨道3（暴跌反弹）：{ta.get("score", 0)}/3</p><ul>' + "".join(f"<li>{k}: {v}</li>" for k, v in ta.get("details", {}).items()) + '</ul>'
         
         # 融入《以交易为生》的交易管理
         atr, ma10, rh, rl, cp = md.get("atr"), md.get("ma10"), md.get("recent_high"), md.get("recent_low"), r.get("current_price")
@@ -195,11 +154,11 @@ def build_email_html(results, active_strategy_name, watchlist):
         if sr.get("direction") == "short" and atr and rh:
             stop = rh + 1.5 * atr
             html += f'<li>建议做空入场：${cp:.4f}</li><li>硬止损价：${stop:.4f} (前高${rh:.4f} + 1.5×ATR${atr:.4f})</li>'
-            html += f'<li>止损空间：{((stop-cp)/cp*100):.2f}% (根据2%规则，建议仓位不超过总资金的 {2/((stop-cp)/cp*100)*100:.1f}%)</li>'
-        elif sr.get("direction") == "long" and atr and rl:
+            html += f'<li>止损空间：{((stop-cp)/cp*100):.2f}% (建议仓位不超过总资金的 {2/((stop-cp)/cp*100)*100:.1f}%)</li>'
+        elif sr.get("direction").startswith("long") and atr and rl:
             stop = rl - 1.5 * atr
             html += f'<li>建议做多入场：${cp:.4f}</li><li>硬止损价：${stop:.4f} (近期低点${rl:.4f} - 1.5×ATR${atr:.4f})</li>'
-            html += f'<li>止损空间：{((cp-stop)/cp*100):.2f}% (根据2%规则，建议仓位不超过总资金的 {2/((cp-stop)/cp*100)*100:.1f}%)</li>'
+            html += f'<li>止损空间：{((cp-stop)/cp*100):.2f}% (建议仓位不超过总资金的 {2/((cp-stop)/cp*100)*100:.1f}%)</li>'
         if cp:
             html += f'<li>移动止盈1（浮盈20%保护成本）：${cp * 1.2:.4f}</li><li>移动止盈2（浮盈50%锁定利润）：${cp * 1.5:.4f}</li>'
         if ma10: html += f'<li>MA10动态离场线：${ma10:.4f}</li>'
@@ -212,10 +171,9 @@ def build_email_html(results, active_strategy_name, watchlist):
         if r.get("status") != "ok": html += f'<li>{r["symbol"]}：{r.get("status")}</li>'
         elif not r.get("strategy_result", {}).get("triggered"):
             sr, md = r.get("strategy_result", {}), r.get("market_data", {})
-            html += f'<li><b>{r["symbol"]}</b> (现价${r.get("current_price")}，高点${md.get("recent_high")})：A {sr.get("track_a",{}).get("score",0)}/4，B {sr.get("track_b",{}).get("score",0)}/3<ul style="color:#666;font-size:0.9em;">'
-            for k, v in sr.get("track_a", {}).get("details", {}).items(): html += f'<li>A-{k}: {v}</li>'
-            for k, v in sr.get("track_b", {}).get("details", {}).items(): html += f'<li>B-{k}: {v}</li>'
-            html += '</ul></li>'
+            t1, t2, t3 = sr.get("track_1", {}), sr.get("track_2", {}), sr.get("track_3", {})
+            html += f'<li><b>{r["symbol"]}</b> (现价${r.get("current_price"):.4f})：'
+            html += f'轨道1 {t1.get("score",0)}/4，轨道2 {t2.get("score",0)}/4，轨道3 {t3.get("score",0)}/3</li>'
     html += '</ul></body></html>'
     return html
 
