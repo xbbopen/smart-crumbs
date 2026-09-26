@@ -24,6 +24,11 @@
       "strategy": "v1_default"
     },
     {
+      "symbol": "SAGA_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
       "symbol": "ENA_USDT",
       "type": "futures",
       "strategy": "v1_default"
