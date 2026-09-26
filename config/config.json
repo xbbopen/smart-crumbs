@@ -9,22 +9,22 @@
       "strategy": "v1_default"
     },
     {
+      "symbol": "PLAY_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
+      "symbol": "NEAR_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
       "symbol": "ARK_USDT",
       "type": "spot",
       "strategy": "v1_default"
     },
     {
-      "symbol": "牛来_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "牛来_USDT",
-      "type": "spot",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "NEAR_USDT",
+      "symbol": "NOM_USDT",
       "type": "spot",
       "strategy": "v1_default"
     },
