@@ -11,6 +11,19 @@ HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 GATEIO_SPOT_KLINE_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
 BJT = timezone(timedelta(hours=8))
 
+# ================= 全局格式化工具 =================
+def fmt_price(price):
+    """统一价格展示格式：<1保留4位小数，1~99保留2位，>=100取整"""
+    if price is None: return "N/A"
+    p = float(price)
+    if p < 1: return f"${p:.4f}"
+    elif p < 100: return f"${p:.2f}"
+    else: return f"${p:.0f}"
+
+def fmt_num(num):
+    if num is None: return "N/A"
+    return f"{num:,.2f}"
+
 # ================= Hyperliquid 合约接口 =================
 def hyperliquid_post(payload: dict):
     try:
@@ -42,8 +55,8 @@ def fetch_hyperliquid_klines(symbol: str, interval: str = "30m", limit: int = 15
     log.info(f"Hyperliquid K线获取成功: {symbol} (coin={coin}), 共 {len(klines)} 根")
     return klines
 
-def fetch_hyperliquid_metrics(symbol: str):
-    """获取资金费率、未平仓合约量（OI）、24h成交量等用于流动性评估"""
+def fetch_hyperliquid_metrics(symbol: str, current_price: float):
+    """获取资金费率、未平仓合约量（OI，转换为美元）"""
     coin = symbol_to_coin(symbol)
     data = hyperliquid_post({"type": "metaAndAssetCtxs"})
     if not data: return None
@@ -52,9 +65,12 @@ def fetch_hyperliquid_metrics(symbol: str):
         for i, asset in enumerate(meta.get("universe", [])):
             if asset.get("name", "").upper() == coin:
                 ctx = ctxs[i] if i < len(ctxs) else {}
+                oi_coins = float(ctx.get("openInterest", 0))
+                # 核心修复：Hyperliquid返回的是币的数量，需要乘以当前价格转换为美元价值
+                oi_usd = oi_coins * current_price
                 return {
                     "funding_rate": float(ctx.get("funding", 0)),
-                    "open_interest": float(ctx.get("openInterest", 0)),
+                    "open_interest": oi_usd,  # 已转换为美元
                     "day_volume": float(ctx.get("dayNtlVlm", 0))
                 }
     except Exception as e:
@@ -112,8 +128,9 @@ def build_market_data(symbol, asset_type):
         if not klines:
             market_data["fetch_status"] = "unsupported"
             return market_data
-        market_data.update({"klines": klines, "current_price": klines[-1]["close"], "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14), "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines), "data_source": "Hyperliquid"})
-        metrics = fetch_hyperliquid_metrics(symbol)
+        current_price = klines[-1]["close"]
+        market_data.update({"klines": klines, "current_price": current_price, "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14), "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines), "data_source": "Hyperliquid"})
+        metrics = fetch_hyperliquid_metrics(symbol, current_price)
         if metrics:
             market_data["funding_rate"] = metrics["funding_rate"]
             market_data["open_interest"] = metrics["open_interest"]
@@ -154,16 +171,27 @@ def main():
         all_results.append({"symbol": symbol, "asset_type": asset_type, "status": "ok", "current_price": market_data.get("current_price"), "strategy_result": result, "market_data": market_data})
         if result.get("triggered"): triggered_any = True
 
-    # 强制每半小时无条件发送报告
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
-    subject = f"【多标的监控】{now} | {'🟢 触发交易信号' if triggered_any else '⏳ 日常巡检报告'}"
+    subject = f"【参谋长预警】{now} | {'🔥 发现暴力做单机会！' if triggered_any else '🛡️ 日常巡检报告'}"
     send_html_email(subject, build_email_html(all_results, active_strategy_name, watchlist))
 
 # ================= 邮件展示 =================
 def build_email_html(results, active_strategy_name, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
-    html = f"<html><body style='font-family:Arial,sans-serif;max-width:900px;margin:0 auto;color:#333;'><h2>📊 三轨并行监控报告</h2>"
-    html += f"<p><b>时间：</b>{now} (北京时间) | <b>策略：</b>{active_strategy_name} | <b>数据源：</b>合约Hyperliquid / 现货Gate.io</p><hr>"
+    
+    # 广告位（置顶）
+    ad_banner = """
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
+        <h1 style="margin: 0; font-size: 28px; letter-spacing: 2px;">🐮 牛来参谋长</h1>
+        <p style="font-size: 16px; margin: 10px 0 0 0; opacity: 0.9;">怕踏空？怕被割？牛来参谋长，专抓暴涨暴跌暴力反弹！</p>
+        <p style="font-size: 18px; font-weight: bold; margin: 5px 0 0 0;">参谋长预警系统，没有感情的赚钱机器。关注我，一起赚！</p>
+    </div>
+    """
+    
+    html = f"<html><body style='font-family:Arial,sans-serif;max-width:900px;margin:0 auto;color:#333;'>"
+    html += ad_banner
+    html += f"<h2 style='border-bottom: 3px solid #e74c3c; padding-bottom: 10px;'>📊 参谋长三轨并行监控报告</h2>"
+    html += f"<p style='color:#666;'><b>时间：</b>{now} (北京时间) | <b>策略：</b>{active_strategy_name} | <b>数据源：</b>合约Hyperliquid / 现货Gate.io</p><hr>"
 
     triggered_list = []
     untriggered_list = []
@@ -180,9 +208,9 @@ def build_email_html(results, active_strategy_name, watchlist):
             untriggered_list.append(r)
 
     # ========== 1. 触发信号部分 ==========
-    html += "<h3>🚨 触发信号详情</h3>"
+    html += "<h3 style='color: #e74c3c; font-size: 24px;'>🚨 触发交易信号 (重点关注)</h3>"
     if not triggered_list:
-        html += "<p style='color:#888;'>当前无标的触发交易信号。</p>"
+        html += "<p style='color:#888; font-size: 16px;'>当前无标的触发交易信号，请保持耐心，等待最佳击球点。</p>"
     else:
         for r in triggered_list:
             md = r.get("market_data", {})
@@ -191,44 +219,66 @@ def build_email_html(results, active_strategy_name, watchlist):
             track_key = "track_1" if direction == "long_trend" else ("track_2" if direction == "short" else "track_3")
             track_name = {"track_1": "底部突破做多", "track_2": "见顶做空", "track_3": "暴跌反弹做多"}[track_key]
             ta = sr.get(track_key, {})
+            cp = r.get("current_price")
+            atr, ma10, rh, rl = md.get("atr"), md.get("ma10"), md.get("recent_high"), md.get("recent_low")
             
-            html += f"<div style='border:2px solid #e74c3c; padding:15px; margin-bottom:20px; border-radius:8px; background-color:#fff9f9;'>"
-            html += f"<h4>🎯 <b>{r['symbol']}</b> ({r.get('asset_type')}) | 当前价：${r.get('current_price'):.4f} | 数据源：{md.get('data_source')}</h4>"
-            html += f"<p><b>✅ 触发策略：{track_name} (得分 {ta.get('score', 0)})</b></p>"
-            html += f"<p><b>触发原因：</b>{sr.get('reason', '满足条件')}</p>"
+            # 杠杆与流动性建议
+            oi = md.get("open_interest")
+            if oi is None: lev_advice = "OI数据缺失，建议 3x 以下轻仓。"
+            elif oi > 500_000_000: lev_advice = "【极高流动性】建议杠杆：20x-50x（请严格计算保证金）。"
+            elif oi > 50_000_000: lev_advice = "【高流动性】建议杠杆：10x-20x。"
+            elif oi > 5_000_000: lev_advice = "【中等流动性】建议杠杆：5x-10x。"
+            else: lev_advice = "【低流动性】建议杠杆：2x-3x（极易插针，轻仓保命）。"
             
-            html += "<p><b>🔍 信号明细：</b></p><ul>"
+            # 2%资金管理计算
+            risk_pct = 0
+            entry_str = fmt_price(cp)
+            stop_str = "N/A"
+            if direction == "short" and atr and rh:
+                stop = rh + 1.5 * atr
+                risk_pct = (stop - cp) / cp
+                stop_str = fmt_price(stop)
+            elif direction.startswith("long") and atr and rl:
+                stop = rl - 1.5 * atr
+                risk_pct = (cp - stop) / cp
+                stop_str = fmt_price(stop)
+                
+            position_pct = min(1.0, 0.02 / risk_pct) if risk_pct > 0 else 1.0
+            # 假设本金 10000 U，计算开仓指南
+            capital = 10000
+            max_loss = capital * 0.02
+            position_value = max_loss / risk_pct if risk_pct > 0 else 0
+            margin_10x = position_value / 10
+            coin_amount = position_value / cp if cp else 0
+
+            html += f"<div style='border:3px solid #e74c3c; padding:15px; margin-bottom:20px; border-radius:8px; background-color:#fff9f9; box-shadow: 0 4px 8px rgba(0,0,0,0.1);'>"
+            html += f"<h4 style='font-size: 22px; color: #c0392b; margin-top: 0;'>🎯 {r['symbol']} ({r.get('asset_type')}) | 当前价：{entry_str} | 数据源：{md.get('data_source')}</h4>"
+            html += f"<p style='font-size: 18px;'><b>✅ 触发策略：{track_name} (得分 {ta.get('score', 0)})</b></p>"
+            html += f"<p style='font-size: 16px;'><b>触发原因：</b>{sr.get('reason', '满足条件')}</p>"
+            
+            html += "<p style='font-size: 16px;'><b>🔍 信号明细：</b></p><ul style='font-size: 15px;'>"
             for k, v in ta.get("details", {}).items():
                 html += f"<li><b>{k}:</b> {v}</li>"
             html += "</ul>"
 
-            atr, ma10, rh, rl, cp = md.get("atr"), md.get("ma10"), md.get("recent_high"), md.get("recent_low"), r.get("current_price")
-            html += "<div style='background:#f0f8ff; padding:10px; border-left:5px solid #2980b9;'>"
-            html += "<p><b>📐 《以交易为生》交易计划</b></p><ul>"
-            if direction == "short" and atr and rh:
-                stop = rh + 1.5 * atr
-                risk_pct = (stop - cp) / cp
-                position_pct = min(1.0, 0.02 / risk_pct) if risk_pct > 0 else 1.0
-                html += f"<li>建议做空入场：${cp:.4f}</li>"
-                html += f"<li>硬止损价：${stop:.4f} (前高${rh:.4f} + 1.5×ATR${atr:.4f})</li>"
-                html += f"<li>止损空间：{risk_pct*100:.2f}%</li>"
-                html += f"<li>✅ 2%资金管理建议：总仓位不超过 <b>{position_pct*100:.1f}%</b></li>"
-            elif direction and direction.startswith("long") and atr and rl:
-                stop = rl - 1.5 * atr
-                risk_pct = (cp - stop) / cp
-                position_pct = min(1.0, 0.02 / risk_pct) if risk_pct > 0 else 1.0
-                html += f"<li>建议做多入场：${cp:.4f}</li>"
-                html += f"<li>硬止损价：${stop:.4f} (近期低点${rl:.4f} - 1.5×ATR${atr:.4f})</li>"
-                html += f"<li>止损空间：{risk_pct*100:.2f}%</li>"
-                html += f"<li>✅ 2%资金管理建议：总仓位不超过 <b>{position_pct*100:.1f}%</b></li>"
+            html += "<div style='background:#f0f8ff; padding:15px; border-left:5px solid #2980b9; margin-top:15px;'>"
+            html += "<h4 style='margin-top:0;'>📐 《以交易为生》交易计划与开仓指南</h4><ul style='font-size: 15px;'>"
+            html += f"<li>建议入场：{entry_str}</li>"
+            html += f"<li>硬止损价：{stop_str} (止损空间 {risk_pct*100:.2f}%)</li>"
+            html += f"<li><b>💡 流动性建议：</b>{lev_advice}</li>"
+            html += f"<li><b>🛡️ 2%资金管理建议：</b>总仓位价值不超过本金的 <b>{position_pct*100:.1f}%</b></li>"
+            html += f"<li><b>📝 具体开仓操作 (以10000U本金为例)：</b><br>"
+            html += f"以 10倍杠杆 为例，建议投入保证金 <b>{margin_10x:.2f} USDT</b>，"
+            html += f"开仓数量为 <b>{coin_amount:.4f} 个 {r['symbol'].replace('_USDT','')}</b>。<br>"
+            html += f"<span style='color:#e67e22;'>（操作提示：在交易所输入该数量，选择10倍杠杆，即可实现2%止损风险控制）</span></li>"
             if cp:
-                html += f"<li>移动止盈1（浮盈20%保护成本）：${cp * 1.2:.4f}</li>"
-                html += f"<li>移动止盈2（浮盈50%锁定利润）：${cp * 1.5:.4f}</li>"
-            if ma10: html += f"<li>MA10动态离场线：${ma10:.4f}</li>"
+                html += f"<li>移动止盈1（浮盈20%保护成本）：{fmt_price(cp * 1.2)}</li>"
+                html += f"<li>移动止盈2（浮盈50%锁定利润）：{fmt_price(cp * 1.5)}</li>"
+            if ma10: html += f"<li>MA10动态离场线：{fmt_price(ma10)}</li>"
             html += "</ul></div></div>"
 
     # ========== 2. 未触发信号部分 ==========
-    html += "<hr><h3>⏳ 未触发标的详情（完整信号与杠杆建议）</h3>"
+    html += "<hr><h3 style='color: #27ae60; font-size: 20px;'>⏳ 未触发标的详情 (静待时机)</h3>"
     for r in untriggered_list:
         if r.get("status") != "ok":
             html += f"<p style='color:#999;'>🎯 <b>{r['symbol']}</b> — 数据获取异常 ({r.get('status')})</p>"
@@ -238,28 +288,30 @@ def build_email_html(results, active_strategy_name, watchlist):
         sr = r.get("strategy_result", {})
         oi = md.get("open_interest")
         day_vol = md.get("day_volume")
+        cp = r.get("current_price")
         
-        # 根据 OI 评估流动性
         if oi is None:
             lev_advice = "无法获取OI数据，建议谨慎使用杠杆。"
-        elif oi > 100_000_000:
-            lev_advice = "【高流动性】(OI>1亿美元) 建议杠杆：10x-20x（结合2%止损规则，实际保证金占用需严格计算）。"
-        elif oi > 10_000_000:
-            lev_advice = "【中等流动性】(OI>1000万美元) 建议杠杆：5x-10x。"
+        elif oi > 500_000_000:
+            lev_advice = "【极高流动性】建议杠杆：20x-50x。"
+        elif oi > 50_000_000:
+            lev_advice = "【高流动性】建议杠杆：10x-20x。"
+        elif oi > 5_000_000:
+            lev_advice = "【中等流动性】建议杠杆：5x-10x。"
         else:
-            lev_advice = "【低流动性】(OI<1000万美元) 建议杠杆：2x-3x（极易被插针爆仓，建议极低杠杆）。"
+            lev_advice = "【低流动性】建议杠杆：2x-3x（极易插针，轻仓保命）。"
             
-        html += f"<div style='border:1px solid #ddd; padding:10px; margin-bottom:15px; border-radius:5px;'>"
-        html += f"<h4>📌 {r['symbol']} ({r.get('asset_type')}) | 现价：${r.get('current_price'):.4f} | 数据源：{md.get('data_source')}</h4>"
+        html += f"<div style='border:1px solid #ddd; padding:10px; margin-bottom:15px; border-radius:5px; background-color: #fafafa;'>"
+        html += f"<h4 style='margin-top:0;'>📌 {r['symbol']} ({r.get('asset_type')}) | 现价：{fmt_price(cp)} | 数据源：{md.get('data_source')}</h4>"
         if oi:
-            html += f"<p style='color:#e67e22;'><b>💡 流动性建议：</b>{lev_advice}</p>"
+            html += f"<p style='color:#e67e22; font-weight:bold;'>💡 流动性建议：{lev_advice} (24h成交额: {fmt_num(day_vol)})</p>"
         
         for track_key, track_name in [("track_1", "【底部突破做多】"), ("track_2", "【见顶做空】"), ("track_3", "【暴跌反弹做多】")]:
             ta = sr.get(track_key, {})
             score = ta.get("score", 0)
             max_score = 4 if track_key in ["track_1", "track_2"] else 3
-            html += f"<p><b>{track_name} 得分：{score}/{max_score}</b></p>"
-            html += "<ul style='color:#555; font-size:0.95em; margin-top:2px;'>"
+            html += f"<p style='margin-bottom:5px;'><b>{track_name} 得分：{score}/{max_score}</b></p>"
+            html += "<ul style='color:#555; font-size:0.9em; margin-top:2px; margin-bottom:10px;'>"
             for k, v in ta.get("details", {}).items():
                 html += f"<li>{k}: {v}</li>"
             html += "</ul>"
@@ -267,11 +319,12 @@ def build_email_html(results, active_strategy_name, watchlist):
 
     # ========== 3. 暂不支持部分 ==========
     if unsupported_list:
-        html += "<hr><h3>⚠️ 暂不支持的标的</h3><ul>"
+        html += "<hr><h3 style='color: #7f8c8d;'>⚠️ 暂不支持的标的</h3><ul>"
         for r in unsupported_list:
             html += f"<li>{r['symbol']}：Hyperliquid 未上线该币种（合约）或 Gate.io 无数据（现货）</li>"
         html += "</ul>"
 
+    html += "<hr><p style='text-align:center; color:#aaa; font-size:12px;'>本报告由牛来参谋长AI预警系统自动生成 | 数据仅供参考，不构成投资建议 | 合约交易风险极高，请严格设置止损</p>"
     html += "</body></html>"
     return html
 
