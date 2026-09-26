@@ -1,7 +1,7 @@
 {
   "active_strategy": "v1_default",
   "shadow_strategies": ["v2_optimized"],
-  "notify_on_no_signal": false,
+  "notify_on_no_signal": true,
   "watchlist": [
     {
       "symbol": "NEAR_USDT",
