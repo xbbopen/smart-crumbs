@@ -1,0 +1,22 @@
+{
+  "active_strategy": "v1_default",
+  "shadow_strategies": ["v2_optimized"],
+  "notify_on_no_signal": false,
+  "watchlist": [
+    {
+      "symbol": "NEAR_USDT",
+      "type": "futures",
+      "strategy": "v1_default"
+    },
+    {
+      "symbol": "BTC_USDT",
+      "type": "spot",
+      "strategy": "v1_default"
+    },
+    {
+      "symbol": "SOME_ALPHA",
+      "type": "alpha",
+      "strategy": "v1_default"
+    }
+  ]
+}

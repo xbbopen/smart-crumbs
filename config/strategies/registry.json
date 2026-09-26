@@ -1,0 +1,10 @@
+{
+  "v1_default": {
+    "module": "v1_default",
+    "class": "V1DefaultStrategy"
+  },
+  "v2_optimized": {
+    "module": "v2_optimized",
+    "class": "V2OptimizedStrategy"
+  }
+}

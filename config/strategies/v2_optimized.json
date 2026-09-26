@@ -1,0 +1,16 @@
+{
+  "track_a": {
+    "min_core_for_warning": 3,
+    "min_core_for_trigger": 4
+  },
+  "track_b": {
+    "drawdown_pct": 15.0,
+    "rsi_oversold": 30,
+    "min_core_for_warning": 2,
+    "min_core_for_trigger": 3
+  },
+  "position": {
+    "atr_mult": 1.5
+  },
+  "_note": "v2_optimized 为预留空壳策略，暂不参与判定，仅供影子模式观察或后续开发使用。"
+}
