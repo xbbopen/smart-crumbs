@@ -14,7 +14,7 @@
       "strategy": "v1_default"
     },
     {
-      "symbol": "SOL_USDT",
+      "symbol": "BTW_USDT",
       "type": "futures",
       "strategy": "v1_default"
     },
