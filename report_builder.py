@@ -266,7 +266,7 @@ def build_risk_warning():
     <p style="font-size: 14px; line-height: 1.7; margin: 10px 0;">合约市场是个绞肉机。<b>90%的人死在这里，不是因为他们不够聪明，而是因为他们管不住手、舍不得止损、扛不住单。</b></p>
     <p style="font-size: 14px; line-height: 1.7; margin: 0;"><b>参谋长给你的不是暴富密码，是一把刀。</b>刀怎么用，能不能活着走出来，看你自己。</p>
     <p style="font-size: 15px; line-height: 1.7; margin: 15px 0 0 0; color: #e74c3c; font-weight: bold;">记住：止损是你唯一的朋友。仓位是你唯一的铠甲。别让贪婪把你拖进深渊。</p>
-    <p style="font-size: 13px; line-height: 1.7; margin: 15px 0 0 0; color: #aaa;">本报告由AI系统自动生成，数据来源于公开市场，仅供交流参考，不构成任何投资建议。加密货币交易具有极高风险，可能导致全部本金损失。请根据自身情况谨慎决策。参谋长只负责指明方向，扣动扳机前请三思。</p>
+    <p style="font-size: 13px; line-height: 1.7; margin: 15px 0 0 0; color: #aaa;">本报告由牛来参谋长敬上，数据来源于公开市场，仅供交流参考，不构成任何投资建议。加密货币交易具有极高风险，可能导致全部本金损失。请根据自身情况谨慎决策。参谋长只负责指明方向，扣动扳机前请三思。</p>
 </div>
 """
 
