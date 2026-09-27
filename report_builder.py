@@ -42,7 +42,7 @@ SIGNAL_GLOSSARY = {
 AD_BANNER = """
 <div style="text-align: center; margin-bottom: 20px;">
     <!-- ⚠️ 请把下面的 src 链接替换为你真实的 GitHub Raw 图片链接 -->
-    <img src="https://raw.githubusercontent.com/xbopen/smart-crumbs/main/banner(1).png" 
+    <img src="https://raw.githubusercontent.com/xbbopen/smart-crumbs/main/banner.png" 
          alt="牛来参谋长" 
          style="width: 100%; max-width: 800px; height: auto; border-radius: 12px; display: block; margin: 0 auto; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
 </div>
