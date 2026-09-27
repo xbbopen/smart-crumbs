@@ -37,12 +37,10 @@ SIGNAL_GLOSSARY = {
     "4H趋势过滤": "逆势做单，死路一条。4小时方向不对，坚决不碰。",
 }
 
-# ================= 🚀 全新：用户自定义横幅 Banner =================
-# 说明：图片已包含口号，此处只需引入图片链接，并做响应式适配
+# ================= 🚀 用户自定义横幅 Banner（保持不变） =================
 AD_BANNER = """
 <div style="text-align: center; margin-bottom: 20px;">
-    <!-- ⚠️ 请把下面的 src 链接替换为你真实的 GitHub Raw 图片链接（压缩后） -->
-    <img src="https://raw.githubusercontent.com/xbbopen/smart-crumbs/main/banner.png" 
+    <img src="https://raw.githubusercontent.com/xbopen/smart-crumbs/main/banner.png" 
          alt="牛来参谋长" 
          loading="lazy" decoding="async"
          style="width: 100%; max-width: 800px; height: auto; border-radius: 12px; display: block; margin: 0 auto; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
@@ -80,6 +78,40 @@ def calc_trade_plan(direction, cp, atr, rh, rl):
         plan["margin_10x"] = plan["position_value"] / 10
         plan["coin_amount"] = plan["position_value"] / cp if cp else 0
     return plan
+
+# ================= 🚀 全新：参谋长行情阶段推演器 =================
+def generate_market_stage(r):
+    """根据当前价格相对于高低点和MA10的位置，判断行情阶段"""
+    md = r.get("market_data", {})
+    cp = r.get("current_price")
+    rsi = md.get("rsi")
+    ma10 = md.get("ma10")
+    rh = md.get("recent_high")
+    rl = md.get("recent_low")
+    adx = md.get("adx")
+
+    if cp is None or rl is None or rh is None:
+        return "数据不足", "无法推演当前阶段。"
+
+    # 状态1：接近近期低点（潜伏期）
+    if cp <= rl * 1.03:
+        return "🟢 潜伏期（底部区域）", "价格正在主力洗盘的底线附近摩擦，参谋长正在密切关注，等待放量突破的号角。此时不宜重仓，保持底仓观察即可。"
+
+    # 状态2：脱离底部，且在MA10上方，RSI偏热（持仓期）
+    elif cp > rl * 1.05 and ma10 and cp > ma10 and rsi and rsi > 65:
+        return "🔥 持仓期（利润奔跑）", f"价格已脱离底部，现价 {cp} 高于生命线 MA10({ma10:.2f})。RSI={rsi:.1f} 偏热，属于拉升中继的正常现象。此前若已上车，请坚决持有，按移动止盈纪律操作；若未上车，切勿追高，等回踩。"
+
+    # 状态3：跌破MA10（衰竭期/离场警告）
+    elif ma10 and cp < ma10:
+        return "🚨 衰竭期（跌破生命线）", f"价格已跌破短期生命线 MA10({ma10:.2f})。这是趋势走弱的重要信号，若持有低位多单，建议执行离场或严格止损，保住利润。空仓者切勿接飞刀。"
+
+    # 状态4：高位震荡（冲顶期）
+    elif cp >= rh * 0.97:
+        return "⚡ 冲顶期（高位博弈）", f"价格已逼近近期高点 {rh}，多空博弈白热化。此时随时可能见顶，若未入场，坚决不追；若已入场，需将止损上移至成本价，准备随时落袋为安。"
+
+    # 默认：震荡整理
+    else:
+        return "⏳ 震荡期（蓄势待发）", "行情处于区间震荡中，多空力量均衡，主力正在等待方向选择。保持耐心，等待开枪信号。"
 
 # ================= 参谋长专属解读引擎 =================
 def generate_commander_comment(r, is_triggered):
@@ -163,12 +195,21 @@ def build_symbol_block(r):
     data_source = md.get('data_source') or '未知数据源'
     funding_pct = md.get('funding_percentile')
     
-    # 🚀 动态调整头部显示：现货降级时，不显示"0%"，而是显示"无此数据"
+    # 🚀 动态调整头部显示
     if "现货" in data_source or "降级" in data_source:
         header_info = f"<div><b>当前价格：</b><span style='color: {border_color}; font-size: 1.2em; font-weight: bold;'>{cp_str}</span></div><div><b>数据源：</b>{data_source} ⚠️</div><div><b>资金费率：</b>现货无此数据</div>"
     else:
         fp_str = f"{funding_pct:.0%}" if funding_pct is not None else "N/A"
         header_info = f"<div><b>当前价格：</b><span style='color: {border_color}; font-size: 1.2em; font-weight: bold;'>{cp_str}</span></div><div><b>数据源：</b>{data_source}</div><div><b>费率拥挤度：</b>{fp_str}</div>"
+
+    # 🚀 新增：在卡片最顶部加入“参谋长持仓跟踪面板”（连贯性的核心！）
+    stage_title, stage_desc = generate_market_stage(r)
+    if not is_triggered:
+        stage_bg = "#f0f8ff"
+        stage_border = "#3498db"
+    else:
+        stage_bg = "#fff3cd"
+        stage_border = "#e74c3c"
 
     html = f"""
     <div style="border: 3px solid {border_color}; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); overflow: hidden;">
@@ -184,6 +225,12 @@ def build_symbol_block(r):
         <!-- 核心数据概览 -->
         <div style="padding: 15px 20px; background: #f8f9fa; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; flex-wrap: wrap; font-size: 14px;">
             {header_info}
+        </div>
+
+        <!-- 🚀 参谋长持仓跟踪面板 -->
+        <div style="margin: 15px; padding: 12px; background: {stage_bg}; border-left: 5px solid {stage_border}; border-radius: 0 8px 8px 0;">
+            <p style="margin: 0; font-size: 15px; font-weight: bold; color: {stage_border};">🧭 参谋长行情阶段：{stage_title}</p>
+            <p style="margin: 5px 0 0 0; font-size: 13px; color: #555; line-height: 1.5;">{stage_desc}</p>
         </div>
     """
     
@@ -352,7 +399,7 @@ def build_report(results, active_strategies, watchlist):
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 觉得有用？点赞、转发、关注“牛来参谋长”，合约交易心不慌！</p>"
+    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 觉得有用？点赞、转发、关注“牛来参谋长”，带你一起埋伏主力！</p>"
     html += "</div></body></html>"
     return subject, html
 
@@ -379,7 +426,7 @@ def build_risk_warning():
 <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d1b1b 100%); color: #e0e0e0; padding: 25px; border-radius: 12px; margin-top: 25px; border: 1px solid #4a2c2c; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
     <h3 style="margin: 0 0 15px 0; color: #ffc107; font-size: 20px; text-align: center; letter-spacing: 2px;">⚠️ 参谋长最后说句掏心窝子的话</h3>
     <div style="border-left: 3px solid #d32f2f; padding-left: 15px; margin-bottom: 15px;">
-        <p style="font-size: 15px; line-height: 1.8; margin: 0; color: #fff;">兄弟们，这份报告是参谋长用无数次失败换来的盯盘心血，但我不能替你扣扳机。</p>
+        <p style="font-size: 15px; line-height: 1.8; margin: 0; color: #fff;">兄弟们，这份报告是参谋长用命换来的盯盘心血，但我不能替你扣扳机。</p>
     </div>
     <p style="font-size: 15px; line-height: 1.8; margin: 0 0 10px 0;">合约市场是个绞肉机。<b style="color: #ffc107;">90%的人死在这里，不是因为他们不够聪明，而是因为他们管不住手、舍不得止损、扛不住单。</b></p>
     <p style="font-size: 15px; line-height: 1.8; margin: 0 0 15px 0;"><b style="color: #ffc107;">参谋长给你的不是暴富密码，是一把刀。</b>刀怎么用，能不能活着走出来，看你自己。</p>
