@@ -49,7 +49,6 @@ def get_leverage_advice(oi):
     return "【流动性差】建议杠杆2x-3x（极易被插针，保命要紧）。"
 
 def calc_trade_plan(direction, cp, atr, rh, rl):
-    """计算止损、仓位、三段式移动止盈"""
     plan = {"stop": None, "risk_pct": 0, "position_pct": 0, "position_value": 0,
             "margin_10x": 0, "coin_amount": 0,
             "tp1_trigger": None, "tp1_stop": None,
@@ -132,15 +131,16 @@ def generate_commander_comment(r, is_triggered):
     
     return f"<div style='background:#f8f9fa; padding:12px; border-left:5px solid #3498db; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#2c3e50;'>{comment}</span></div>"
 
-def build_triggered_section(results):
+def build_triggered_section(triggered_list):
     html = "<h3 style='color:#e74c3c; border-left:5px solid #e74c3c; padding-left:10px; font-size:22px;'>🚨 参谋长开枪警告（引爆行情）</h3>"
-    found = False
-    for r in results:
-        if r.get("status") != "ok": continue
+    if not triggered_list:
+        html += "<p style='color:#888; padding:10px; font-size:16px;'>🛡️ 当前主力还在洗盘，无明确开枪信号。参谋长正在紧盯盘面，兄弟们切勿盲目进场！</p>"
+        return html
+        
+    for r in triggered_list:
+        md = r.get("market_data", {})
         for sname, sr in r.get("strategy_results", {}).items():
             if not sr or not sr.get("triggered"): continue
-            found = True
-            md = r.get("market_data", {})
             direction = sr.get("direction")
             track_key = {"short":"track_2","long_trend":"track_1","long_rebound":"track_3"}.get(direction,"track_1")
             track_name = {"short":"🔪 见顶做空（主力磨刀霍霍）","long_trend":"🚀 底部突破做多（主力点火起飞）","long_rebound":"🩸 暴跌反弹做多（黄金坑抢筹）"}.get(direction,"未知")
@@ -162,7 +162,7 @@ def build_triggered_section(results):
                 html += f"<li><b>{k}:</b> <span style='color:#d35400;'>{v}</span> <br><span style='color:#7f8c8d;font-size:0.85em;'>💡 参谋长解读：{exp}</span></li>"
             html += "</ul>"
             
-            # ========== 具体操作建议（举例说明） ==========
+            # 具体操作建议
             html += f"<div style='background:#fff; padding:15px; border-left:5px solid #f39c12; margin-top:15px; border-radius:0 8px 8px 0;'>"
             html += f"<h4 style='margin-top:0; color:#e67e22;'>🎯 参谋长具体操作指令（照着做就行）</h4>"
             
@@ -193,16 +193,17 @@ def build_triggered_section(results):
             html += "</div>"
             html += generate_commander_comment(r, is_triggered=True)
             html += "</div>"
-
-    if not found:
-        html += "<p style='color:#888; padding:10px; font-size:16px;'>🛡️ 当前主力还在洗盘，无明确开枪信号。参谋长正在紧盯盘面，兄弟们切勿盲目进场！</p>"
     return html
 
-def build_untriggered_section(results):
+def build_untriggered_section(untriggered_list):
     html = "<hr><h3 style='color:#27ae60; border-left:5px solid #27ae60; padding-left:10px; font-size:20px;'>🔮 参谋长盘面推演（未触发，但暗流涌动）</h3>"
     html += "<p style='color:#666; font-size:0.95em;'>以下是参谋长对当前盘面的全面推演。虽然还没到开枪时机，但主力的意图已经写在盘面上：</p>"
     
-    for r in results:
+    if not untriggered_list:
+        html += "<p style='color:#888; padding:10px;'>当前所有标的均已触发信号，参谋长正在全力盯盘！</p>"
+        return html
+
+    for r in untriggered_list:
         if r.get("status") != "ok":
             html += f"<p style='color:#999;'>🎯 <b>{r['symbol']}</b> — 数据异常（{r.get('status')}），主力高度控盘，暂不分析。</p>"
             continue
@@ -258,31 +259,31 @@ def build_glossary_section():
     return html
 
 def build_risk_warning():
-    """参谋长风格的风险声明（煽动性+个性化）"""
     return """
 <div style="background: linear-gradient(135deg, #2c3e50 0%, #4a2c2c 100%); color: white; padding: 20px; border-radius: 10px; margin-top: 20px;">
     <h3 style="margin: 0 0 10px 0; color: #f39c12; font-size: 18px;">⚠️ 参谋长最后说句掏心窝子的话</h3>
-    <p style="font-size: 14px; line-height: 1.7; margin: 0;">
-        兄弟们，这份报告是参谋长用命换来的盯盘心血，但我不能替你扣扳机。
-    </p>
-    <p style="font-size: 14px; line-height: 1.7; margin: 10px 0;">
-        合约市场是个绞肉机。<b>90%的人死在这里，不是因为他们不够聪明，而是因为他们管不住手、舍不得止损、扛不住单。</b>
-    </p>
-    <p style="font-size: 14px; line-height: 1.7; margin: 0;">
-        <b>参谋长给你的不是暴富密码，是一把刀。</b>刀怎么用，能不能活着走出来，看你自己。
-    </p>
-    <p style="font-size: 15px; line-height: 1.7; margin: 15px 0 0 0; color: #e74c3c; font-weight: bold;">
-        记住：止损是你唯一的朋友。仓位是你唯一的铠甲。别让贪婪把你拖进深渊。
-    </p>
-    <p style="font-size: 13px; line-height: 1.7; margin: 15px 0 0 0; color: #aaa;">
-        本报告由AI系统自动生成，数据来源于公开市场，仅供交流参考，不构成任何投资建议。加密货币交易具有极高风险，可能导致全部本金损失。请根据自身情况谨慎决策。参谋长只负责指明方向，扣动扳机前请三思。
-    </p>
+    <p style="font-size: 14px; line-height: 1.7; margin: 0;">兄弟们，这份报告是参谋长用命换来的盯盘心血，但我不能替你扣扳机。</p>
+    <p style="font-size: 14px; line-height: 1.7; margin: 10px 0;">合约市场是个绞肉机。<b>90%的人死在这里，不是因为他们不够聪明，而是因为他们管不住手、舍不得止损、扛不住单。</b></p>
+    <p style="font-size: 14px; line-height: 1.7; margin: 0;"><b>参谋长给你的不是暴富密码，是一把刀。</b>刀怎么用，能不能活着走出来，看你自己。</p>
+    <p style="font-size: 15px; line-height: 1.7; margin: 15px 0 0 0; color: #e74c3c; font-weight: bold;">记住：止损是你唯一的朋友。仓位是你唯一的铠甲。别让贪婪把你拖进深渊。</p>
+    <p style="font-size: 13px; line-height: 1.7; margin: 15px 0 0 0; color: #aaa;">本报告由AI系统自动生成，数据来源于公开市场，仅供交流参考，不构成任何投资建议。加密货币交易具有极高风险，可能导致全部本金损失。请根据自身情况谨慎决策。参谋长只负责指明方向，扣动扳机前请三思。</p>
 </div>
 """
 
 def build_report(results, active_strategies, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
-    any_triggered = any(sr and sr.get("triggered") for r in results for sr in r.get("strategy_results", {}).values())
+    
+    # 🚀 核心修复：先在标级别进行去重，只要触发就进triggered_list
+    triggered_list = []
+    untriggered_list = []
+    for r in results:
+        has_triggered = any(sr and sr.get("triggered") for sr in r.get("strategy_results", {}).values())
+        if has_triggered:
+            triggered_list.append(r)
+        else:
+            untriggered_list.append(r)
+
+    any_triggered = len(triggered_list) > 0
     
     if any_triggered:
         subject = f"🚨【参谋长战报】主力动手了！发现暴力做单机会！速看！"
@@ -295,8 +296,8 @@ def build_report(results, active_strategies, watchlist):
     html += f"<h2 style='border-bottom: 3px solid #e74c3c; padding-bottom: 10px; color:#2c3e50;'>📊 参谋长多策略监控报告</h2>"
     html += f"<p style='color:#666;'><b>时间：</b>{now} | <b>策略：</b>{', '.join(active_strategies)} | <b>数据源：</b>多源智能降级</p>"
     
-    html += build_triggered_section(results)
-    html += build_untriggered_section(results)
+    html += build_triggered_section(triggered_list)
+    html += build_untriggered_section(untriggered_list)
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
