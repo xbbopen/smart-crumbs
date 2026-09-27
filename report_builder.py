@@ -16,7 +16,7 @@ AD_BANNER = """
 <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
     <h1 style="margin: 0; font-size: 28px;">🐮 牛来参谋长</h1>
     <p style="font-size: 16px; margin: 10px 0 0 0;">怕踏空？怕被割？牛来参谋长，专抓暴涨暴跌暴力反弹！</p>
-    <p style="font-size: 18px; font-weight: bold; margin: 5px 0 0 0;">参谋长预警系统，没感情的赚钱机器。关注我，一起赚！</p>
+    <p style="font-size: 18px; font-weight: bold; margin: 5px 0 0 0;">参谋长预警系统，没有感情的赚钱机器。关注我，一起赚！</p>
 </div>
 """
 
@@ -94,26 +94,40 @@ def build_report(results, active_strategies, watchlist):
     if not found:
         html += "<p style='color:#888;'>当前无标的触发交易信号。</p>"
 
-    # 未触发
-    html += "<hr><h3 style='color:#27ae60;'>⏳ 未触发标的详情</h3>"
+    # 未触发（🔥 核心修复：全面展开所有子信号细节）
+    html += "<hr><h3 style='color:#27ae60;'>⏳ 未触发标的详情（静待时机）</h3>"
     for r in results:
         if r.get("status") != "ok":
             html += f"<p style='color:#999;'>{r['symbol']} — 数据异常（{r.get('status')}）</p>"
             continue
         md = r.get("market_data", {})
         cp = r.get("current_price")
-        html += f"<div style='border:1px solid #ddd; padding:10px; margin-bottom:10px;'>"
+        html += f"<div style='border:1px solid #ddd; padding:10px; margin-bottom:15px; border-radius:5px; background:#fafafa;'>"
         html += f"<h4>{r['symbol']} ({r.get('asset_type')}) | 现价${cp} | 源:{md.get('data_source')}</h4>"
         if md.get("open_interest"):
             html += f"<p style='color:#e67e22;'>💡 {get_leverage_advice(md.get('open_interest'))}</p>"
+        
         for sname, sr in r.get("strategy_results", {}).items():
             if not sr: continue
-            html += f"<p><b>策略：{sname}</b></p><ul style='font-size:0.9em;color:#555;'>"
+            html += f"<div style='margin-top:8px; padding-left:10px; border-left:3px solid #8e44ad;'>"
+            html += f"<p style='margin-bottom:3px;'><b>策略：{sname}</b></p>"
             for tk, tn in [("track_1","底部突破做多"),("track_2","见顶做空"),("track_3","暴跌反弹做多")]:
                 ta = sr.get(tk, {})
                 hard = "✅硬条件通过" if ta.get("hard_ok") else "❌硬条件未过"
-                html += f"<li>{tn}：{ta.get('score',0)}/{'4' if tk in ['track_1','track_2'] else '3'} {hard}</li>"
-            html += "</ul>"
+                score = ta.get('score', 0)
+                max_score = 4 if tk in ['track_1','track_2'] else 3
+                html += f"<p style='margin:5px 0; font-size:0.95em;'><b>{tn}：{score}/{max_score} {hard}</b></p>"
+                
+                # 强行展开 details 字典，无论是否得分
+                details = ta.get("details", {})
+                if details:
+                    html += "<ul style='color:#555; font-size:0.85em; margin-top:2px; margin-bottom:10px;'>"
+                    for k, v in details.items():
+                        html += f"<li><b>{k}:</b> {v}</li>"
+                    html += "</ul>"
+                else:
+                    html += "<p style='color:#999; font-size:0.85em;'>无详细数据</p>"
+            html += "</div>"
         html += "</div>"
 
     # 指标详解
