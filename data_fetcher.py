@@ -220,8 +220,12 @@ def build_market_data(symbol, asset_type):
                 md["funding_rate"] = metrics["funding_rate"]
                 md["open_interest"] = metrics["open_interest"]
                 md["day_volume"] = metrics["day_volume"]
-                if metrics["funding_rate"] is not None:
-                    md["funding_percentile"] = min(1.0, max(0.0, metrics["funding_rate"] / 0.01))
+                fr = metrics["funding_rate"]
+                if fr is not None:
+                    if fr <= 0:
+                        md["funding_percentile"] = 0.0
+                    else:
+                        md["funding_percentile"] = min(1.0, fr / 0.01)rate"] / 0.01))
             return md
         else:
             # 🚀 核心修复：合约拿不到数据，触发降级拿现货
