@@ -40,7 +40,7 @@ SIGNAL_GLOSSARY = {
 # ================= 🚀 用户自定义横幅 Banner（保持不变） =================
 AD_BANNER = """
 <div style="text-align: center; margin-bottom: 20px;">
-    <img src="https://raw.githubusercontent.com/xbopen/smart-crumbs/main/banner.png" 
+    <img src="https://raw.githubusercontent.com/xbbopen/smart-crumbs/main/banner.png" 
          alt="牛来参谋长" 
          loading="lazy" decoding="async"
          style="width: 100%; max-width: 800px; height: auto; border-radius: 12px; display: block; margin: 0 auto; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
@@ -399,7 +399,7 @@ def build_report(results, active_strategies, watchlist):
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 觉得有用？点赞、转发、关注“牛来参谋长”，带你一起埋伏主力！</p>"
+    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 觉得有用？点赞、转发、关注“牛来参谋长”，合约交易心不慌！</p>"
     html += "</div></body></html>"
     return subject, html
 
@@ -426,13 +426,13 @@ def build_risk_warning():
 <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d1b1b 100%); color: #e0e0e0; padding: 25px; border-radius: 12px; margin-top: 25px; border: 1px solid #4a2c2c; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
     <h3 style="margin: 0 0 15px 0; color: #ffc107; font-size: 20px; text-align: center; letter-spacing: 2px;">⚠️ 参谋长最后说句掏心窝子的话</h3>
     <div style="border-left: 3px solid #d32f2f; padding-left: 15px; margin-bottom: 15px;">
-        <p style="font-size: 15px; line-height: 1.8; margin: 0; color: #fff;">兄弟们，这份报告是参谋长用命换来的盯盘心血，但我不能替你扣扳机。</p>
+        <p style="font-size: 15px; line-height: 1.8; margin: 0; color: #fff;">兄弟们，这份报告是参谋长用无数次失败换来的盯盘心血，但我不能替你扣扳机。</p>
     </div>
     <p style="font-size: 15px; line-height: 1.8; margin: 0 0 10px 0;">合约市场是个绞肉机。<b style="color: #ffc107;">90%的人死在这里，不是因为他们不够聪明，而是因为他们管不住手、舍不得止损、扛不住单。</b></p>
     <p style="font-size: 15px; line-height: 1.8; margin: 0 0 15px 0;"><b style="color: #ffc107;">参谋长给你的不是暴富密码，是一把刀。</b>刀怎么用，能不能活着走出来，看你自己。</p>
     <div style="background: rgba(211, 47, 47, 0.2); padding: 12px; border-radius: 8px; text-align: center;">
         <p style="font-size: 16px; line-height: 1.8; margin: 0; color: #ff5252; font-weight: bold;">记住：止损是你唯一的朋友。仓位是你唯一的铠甲。别让贪婪把你拖进深渊。</p>
     </div>
-    <p style="font-size: 12px; line-height: 1.6; margin: 20px 0 0 0; color: #888; text-align: center;">本报告由AI系统自动生成，数据来源于公开市场，仅供交流参考，不构成任何投资建议。<br>加密货币交易具有极高风险，可能导致全部本金损失。参谋长只负责指明方向，扣动扳机前请三思。</p>
+    <p style="font-size: 12px; line-height: 1.6; margin: 20px 0 0 0; color: #888; text-align: center;">本报告由牛来参谋长自研标的监控系统生成，数据来源于公开市场，仅供交流参考，不构成任何投资建议。<br>加密货币交易具有极高风险，可能导致全部本金损失。参谋长只负责指明方向，扣动扳机前请三思。</p>
 </div>
 """
