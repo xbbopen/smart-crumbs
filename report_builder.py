@@ -7,7 +7,7 @@ BJT = timezone(timedelta(hours=8))
 def translate_asset_type(asset_type):
     return {"futures": "合约", "spot": "现货"}.get(asset_type, asset_type)
 
-# ================= 信号条件的通俗解释（帮助粉丝看懂） =================
+# ================= 信号条件的通俗解释 =================
 CONDITION_EXPLANATIONS = {
     "1.1-底部区域": "价格是否跌到了主力近期洗盘的底线（狙击区）",
     "1.2-站上MA10": "短期生命线是否收复（多军开始反击）",
@@ -26,7 +26,7 @@ CONDITION_EXPLANATIONS = {
     "数据不足": "数据源获取失败（跳过本次推演）"
 }
 
-# ================= 指标词典（报告末尾附录使用） =================
+# ================= 指标词典 =================
 SIGNAL_GLOSSARY = {
     "ADX": "趋势强度指标。没有20以上的ADX，所有突破都可能是假动作。",
     "CVD": "量价背离神器。价格骗人，但资金的流向骗不了人。",
@@ -37,29 +37,23 @@ SIGNAL_GLOSSARY = {
     "4H趋势过滤": "逆势做单，死路一条。4小时方向不对，坚决不碰。",
 }
 
-# ================= 🚀 中式美学头部 Banner + 专属Logo =================
+# ================= 🚀 全新：币安官方UI风格头部 =================
+# 视觉设计思路：极简深灰背景 + 币安黄（#FCD535）点缀 + 现代无衬线字体
 AD_BANNER = """
-<div style="background: linear-gradient(135deg, #d32f2f 0%, #b71c1c 50%, #880e4f 100%); border-radius: 12px; padding: 30px 20px; color: #fff; text-align: center; border: 2px solid #ffc107; box-shadow: 0 10px 25px rgba(183,28,28,0.4); position: relative; overflow: hidden;">
-    <!-- 装饰光晕 -->
-    <div style="position: absolute; top: -50px; left: -50px; width: 150px; height: 150px; background: rgba(255, 193, 7, 0.15); border-radius: 50%; filter: blur(30px);"></div>
-    <div style="position: absolute; bottom: -50px; right: -50px; width: 150px; height: 150px; background: rgba(255, 193, 7, 0.15); border-radius: 50%; filter: blur(30px);"></div>
-    
-    <!-- 牛来参谋长 专属Logo (内联SVG印章) -->
-    <div style="display: inline-block; margin-bottom: 10px;">
-        <svg width="70" height="70" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-            <rect x="5" y="5" width="90" height="90" rx="10" fill="#b71c1c" stroke="#ffc107" stroke-width="4"/>
-            <path d="M30 40 Q50 20 70 40 L80 40 Q70 60 50 60 Q30 60 20 40 Z" fill="#ffc107"/>
-            <circle cx="40" cy="35" r="3" fill="#b71c1c"/>
-            <circle cx="60" cy="35" r="3" fill="#b71c1c"/>
-            <path d="M45 45 Q50 50 55 45" fill="none" stroke="#b71c1c" stroke-width="3"/>
-            <text x="50" y="80" font-family="'STKaiti', 'KaiTi', sans-serif" font-size="22" fill="#ffc107" text-anchor="middle" font-weight="bold">参谋长</text>
+<div style="background-color: #181A20; border-radius: 12px; padding: 30px 20px; text-align: center; border: 1px solid #2B3139; margin-bottom: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+    <div style="margin-bottom: 15px;">
+        <!-- 极简Logo：币安风菱形/牛头抽象 -->
+        <svg width="60" height="60" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <path d="M50 15 L85 50 L50 85 L15 50 Z" fill="#FCD535" opacity="0.2"/>
+            <path d="M50 25 L75 50 L50 75 L25 50 Z" fill="none" stroke="#FCD535" stroke-width="4"/>
+            <circle cx="50" cy="50" r="6" fill="#FCD535"/>
         </svg>
     </div>
     
-    <h1 style="margin: 0; font-size: 38px; font-family: 'STKaiti', 'KaiTi', 'Microsoft YaHei', sans-serif; color: #ffd54f; text-shadow: 2px 2px 4px rgba(0,0,0,0.6); letter-spacing: 4px;">牛来参谋长</h1>
-    <p style="font-size: 16px; margin: 12px 0 0 0; color: #fff; font-weight: bold; letter-spacing: 1px;">专抓暴涨暴跌 · 做没有感情的赚钱机器</p>
-    <div style="margin-top: 18px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 12px; font-size: 14px; color: #ffecb3; font-weight: bold;">
-        怕踏空？怕被割？关注参谋长，一起埋伏主力！
+    <h1 style="margin: 0; font-size: 32px; font-weight: 800; color: #FFFFFF; letter-spacing: 2px;">牛来参谋长</h1>
+    <p style="font-size: 15px; margin: 12px 0 8px 0; color: #848E9C; font-weight: 500;">专抓暴涨暴跌 · 做没有感情的赚钱机器</p>
+    <div style="display: inline-block; background-color: #2B3139; padding: 8px 16px; border-radius: 20px; margin-top: 10px;">
+        <p style="font-size: 14px; margin: 0; color: #FCD535; font-weight: 600;">怕踏空？怕被割？关注参谋长，一起埋伏主力！</p>
     </div>
 </div>
 """
@@ -143,7 +137,7 @@ def generate_commander_comment(r, is_triggered):
             else: comment = f"{r['symbol']} 目前处于垃圾时间，各项指标都不达标，主力还在洗盘。参谋长从不打无准备之仗，空仓休息也是一种操作，等信号出来，我第一时间喊单！"
     return f"<div style='background:#f8f9fa; padding:12px; border-left:5px solid #3498db; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#2c3e50;'>{comment}</span></div>"
 
-# ================= 标的独立卡片（支持直接截图发广场） =================
+# ================= 标的独立卡片 =================
 def build_symbol_block(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
@@ -174,7 +168,7 @@ def build_symbol_block(r):
         badge_bg = "#95a5a6"
         badge_color = "#ffffff"
 
-    # 🚀 数据容错处理：避免 None 值强行格式化导致程序崩溃
+    # 🚀 数据容错处理
     data_source = md.get('data_source') or '未知数据源'
     funding_pct = md.get('funding_percentile')
     
@@ -229,7 +223,6 @@ def build_symbol_block(r):
             html += f"1️⃣ 价格到 <b>${plan['tp1_trigger']:.4f}</b> 时，止损移至成本价 ${plan['tp1_stop']:.4f}<br>"
             html += f"2️⃣ 价格到 <b>${plan['tp2_trigger']:.4f}</b> 时，止损移至 ${plan['tp2_stop']:.4f}<br>"
             html += f"3️⃣ 价格到 <b>${plan['tp3_trigger']:.4f}</b> 时，止损移至 ${plan['tp3_stop']:.4f}，并建议止盈50%仓位</p>"
-        # 安全处理 ma10 为 None 的情况
         ma10_val = md.get('ma10')
         ma10_str = f"${ma10_val:.4f}" if isinstance(ma10_val, (int, float)) else "N/A"
         html += f"<p><b>MA10动态离场线：</b>{ma10_str}</p>"
@@ -308,7 +301,7 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results):
     is_short = any(d == "short" for d in all_directions)
     is_long = any(d.startswith("long") for d in all_directions)
 
-    # 1. 有信号触发（高燃情绪）
+    # 1. 有信号触发
     if triggered_list:
         if len(triggered_list) >= 2:
             return random.choice([
@@ -322,7 +315,7 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results):
             return random.choice([f"🩸【参谋长战报】瀑布警告！主力磨刀霍霍，{tr_syms[0]}即将暴跌？", f"🔪【牛来参谋长】高位狂欢结束，{tr_syms[0]}即将一锅端！", f"⚠️【参谋长预警】极度贪婪！{tr_syms[0]}费率爆表，收割倒计时已开启！"])
         else:
             return random.choice([f"🚀【参谋长战报】火箭点火！{tr_syms[0]}暴力拉升启动！", f"💥【牛来参谋长】{tr_syms[0]}蓄力完毕，完美站上支撑，准备迎接财富列车！", f"🐮【参谋长预警】别踏空！{tr_syms[0]}突破在即，主力扫货痕迹明显！"])
-    # 2. 无信号触发（制造悬念）
+    # 2. 无信号触发
     else:
         if min_adx < 20:
             return random.choice([f"⚠️【参谋长推演】大盘死水微澜？主力正在密谋大动作，散户千万别乱动！", f"🛡️【参谋长推演】ADX告急！主力高度控盘，此刻入场就是送人头！", f"🧐【牛来参谋长】盘面毫无波澜？越是平静，主力憋的大招越狠！"])
@@ -339,7 +332,7 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results):
 def build_report(results, active_strategies, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     
-    # 🚀 核心去重逻辑：只要标的触发了，就进触发区，绝不在未触发区展示
+    # 🚀 核心去重逻辑
     triggered_list = []
     untriggered_list = []
     for r in results:
@@ -355,15 +348,12 @@ def build_report(results, active_strategies, watchlist):
     html += f"<h2 style='border-bottom: 3px solid #e74c3c; padding-bottom: 10px; color:#2c3e50;'>📊 参谋长多策略监控报告</h2>"
     html += f"<p style='color:#666;'><b>时间：</b>{now} | <b>策略：</b>{', '.join(active_strategies)} | <b>数据源：</b>多源智能降级</p>"
     
-    # 插入导航面板
     html += build_dashboard(results, triggered_list, untriggered_list)
 
-    # 先输出触发信号
     if triggered_list:
         html += "<h3 style='color:#e74c3c; border-left:5px solid #e74c3c; padding-left:10px; font-size:22px; margin-top:30px;'>🚨 参谋长开枪警告（引爆行情）</h3>"
         for r in triggered_list: html += build_symbol_block(r)
     
-    # 再输出未触发信号
     if untriggered_list:
         html += "<hr><h3 style='color:#27ae60; border-left:5px solid #27ae60; padding-left:10px; font-size:20px; margin-top:30px;'>🔮 参谋长盘面推演（未触发，但暗流涌动）</h3>"
         for r in untriggered_list: html += build_symbol_block(r)
@@ -392,7 +382,7 @@ def build_glossary_section():
     html += "</div>"
     return html
 
-# ================= 辅助模块：中式美学结尾风险声明 =================
+# ================= 辅助模块：风险声明 =================
 def build_risk_warning():
     return """
 <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d1b1b 100%); color: #e0e0e0; padding: 25px; border-radius: 12px; margin-top: 25px; border: 1px solid #4a2c2c; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
