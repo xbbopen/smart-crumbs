@@ -1,4 +1,10 @@
-import json, time, argparse, os, sys
+"""
+回测引擎 - 支持合约/现货双模式，自动识别降级
+用法示例：
+    python backtest.py --strategies v1_default --symbols BTC NEAR --interval 30m
+    python backtest.py --strategies v1_default --symbols ARK --start_date 2026-01-01 --end_date 2026-03-01
+"""
+import json, time, argparse, os
 from datetime import datetime, timezone, timedelta
 from strategies.loader import load_strategy
 from data_fetcher import fetch_hyperliquid_klines, fetch_binance_spot_klines, fetch_gateio_spot_klines, calc_ma, calc_atr, calc_rsi, calc_adx
@@ -15,21 +21,41 @@ def parse_date(d):
         return None
 
 def fetch_klines_for_backtest(symbol, asset_type, interval, limit, start_ms, end_ms):
+    """
+    回测数据获取：
+    - 合约优先 Hyperliquid
+    - 拿不到自动降级现货（币安 -> Gate.io）
+    - 原生现货直接走币安 -> Gate.io
+    返回 (klines, data_mode, data_source)
+    """
     if asset_type == "futures":
-        return fetch_hyperliquid_klines(symbol, interval, limit, start_ms, end_ms)
-    else:
-        # 现货：币安镜像 -> Gate.io -> Hyperliquid
+        k = fetch_hyperliquid_klines(symbol, interval, limit, start_ms, end_ms)
+        if k:
+            return k, "futures", "Hyperliquid 合约"
+        # 降级到现货
         k = fetch_binance_spot_klines(symbol, interval, limit, start_ms, end_ms)
-        if k: return k
+        if k:
+            return k, "spot", "币安镜像 现货（合约降级）"
         k = fetch_gateio_spot_klines(symbol, interval, limit)
-        if k: return k
-        return fetch_hyperliquid_klines(symbol, interval, limit, start_ms, end_ms)
+        if k:
+            return k, "spot", "Gate.io 现货（合约降级）"
+        return None, "unsupported", "无数据"
+    else:
+        k = fetch_binance_spot_klines(symbol, interval, limit, start_ms, end_ms)
+        if k:
+            return k, "spot", "币安镜像 现货"
+        k = fetch_gateio_spot_klines(symbol, interval, limit)
+        if k:
+            return k, "spot", "Gate.io 现货"
+        return None, "unsupported", "无数据"
+
 
 def run_single(strategy_name, symbol, asset_type, interval, limit, capital, fee, start_ms, end_ms):
-    klines = fetch_klines_for_backtest(symbol, asset_type, interval, limit, start_ms, end_ms)
+    klines, data_mode, data_source = fetch_klines_for_backtest(symbol, asset_type, interval, limit, start_ms, end_ms)
     if not klines or len(klines) < 200:
         print(f"⚠️ {symbol} 数据不足")
         return None
+
     strategy = load_strategy(strategy_name)
     position, entry = None, 0
     total, wins, losses = 0, 0, 0
@@ -39,6 +65,7 @@ def run_single(strategy_name, symbol, asset_type, interval, limit, capital, fee,
         window = klines[:i+1]
         md = {
             "symbol": f"{symbol}_USDT", "asset_type": asset_type,
+            "data_mode": data_mode,  # 🚀 关键：与实盘 market_data 结构一致
             "current_price": window[-1]["close"], "klines": window,
             "klines_4h": [], "ma10": calc_ma(window,10), "atr": calc_atr(window,14),
             "rsi": calc_rsi(window,14), "adx": calc_adx(window,14),
@@ -46,7 +73,7 @@ def run_single(strategy_name, symbol, asset_type, interval, limit, capital, fee,
             "recent_low": min(k["low"] for k in window[-150:-1]),
             "funding_rate": None, "funding_percentile": None,
             "open_interest": None, "day_volume": None,
-            "data_source": "backtest"
+            "data_source": data_source
         }
         try:
             res = strategy.evaluate(symbol, asset_type, md)
@@ -73,15 +100,18 @@ def run_single(strategy_name, symbol, asset_type, interval, limit, capital, fee,
         capital += pnl
         if pnl > 0: wins += 1
         else: losses += 1
+
     wr = wins/(wins+losses)*100 if (wins+losses)>0 else 0
     ret = (capital - 10000)/10000*100
-    print(f"✅ {strategy_name} {symbol}: {total}笔, 胜率{wr:.1f}%, 收益{ret:.2f}%, 回撤{max_dd*100:.2f}%")
+    print(f"✅ {strategy_name} {symbol} [{data_source}]: {total}笔, 胜率{wr:.1f}%, 收益{ret:.2f}%, 回撤{max_dd*100:.2f}%")
     return {
         "strategy": strategy_name, "symbol": symbol, "asset_type": asset_type,
+        "data_mode": data_mode, "data_source": data_source,
         "total_trades": total, "wins": wins, "losses": losses, "win_rate": wr,
         "final_capital": capital, "total_return": ret, "max_dd": max_dd*100,
         "interval": interval, "start_ms": start_ms, "end_ms": end_ms
     }
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -91,6 +121,7 @@ def main():
     parser.add_argument("--limit", type=int)
     parser.add_argument("--start_date")
     parser.add_argument("--end_date")
+    parser.add_argument("--asset_type", default="futures", help="futures 或 spot")
     args = parser.parse_args()
 
     with open("config/config.json") as f:
@@ -102,6 +133,7 @@ def main():
     limit = args.limit or int(os.environ.get("BT_LIMIT","0")) or d.get("limit",1000)
     start_date = args.start_date or os.environ.get("BT_START_DATE") or d.get("start_date","")
     end_date = args.end_date or os.environ.get("BT_END_DATE") or d.get("end_date","")
+    asset_type = args.asset_type or os.environ.get("BT_ASSET_TYPE") or "futures"
     start_ms = parse_date(start_date)
     end_ms = parse_date(end_date)
     capital = d.get("initial_capital", 10000)
@@ -110,7 +142,6 @@ def main():
     all_reports = []
     for strat in strategies:
         for sym in symbols:
-            asset_type = "futures"  # 回测默认合约；如需现货请指定？暂且默认合约
             rep = run_single(strat, sym, asset_type, interval, limit, capital, fee, start_ms, end_ms)
             if rep: all_reports.append(rep)
             time.sleep(2)
@@ -124,10 +155,10 @@ def main():
     html = f"<html><body style='font-family:Arial;max-width:900px;margin:auto;'><h2>📊 参谋长回测报告</h2>"
     html += f"<p>时间：{now} | 周期：{interval} | 策略：{', '.join(strategies)} | 标的：{', '.join(symbols)}</p>"
     html += "<table border='1' cellpadding='8' style='border-collapse:collapse;width:100%;'>"
-    html += "<tr style='background:#f0f0f0;'><th>策略</th><th>标的</th><th>交易次数</th><th>胜率</th><th>收益%</th><th>最大回撤%</th></tr>"
+    html += "<tr style='background:#f0f0f0;'><th>策略</th><th>标的</th><th>数据源</th><th>交易次数</th><th>胜率</th><th>收益%</th><th>最大回撤%</th></tr>"
     for r in all_reports:
         color = "green" if r["total_return"] > 0 else "red"
-        html += f"<tr><td>{r['strategy']}</td><td>{r['symbol']}</td><td>{r['total_trades']}</td><td>{r['win_rate']:.1f}%</td><td style='color:{color};'>{r['total_return']:.2f}%</td><td>{r['max_dd']:.2f}%</td></tr>"
+        html += f"<tr><td>{r['strategy']}</td><td>{r['symbol']}</td><td>{r['data_source']}</td><td>{r['total_trades']}</td><td>{r['win_rate']:.1f}%</td><td style='color:{color};'>{r['total_return']:.2f}%</td><td>{r['max_dd']:.2f}%</td></tr>"
     html += "</table>"
     if len(all_reports) > 1:
         by_s = {}
