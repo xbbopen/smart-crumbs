@@ -41,9 +41,10 @@ SIGNAL_GLOSSARY = {
 # 说明：图片已包含口号，此处只需引入图片链接，并做响应式适配
 AD_BANNER = """
 <div style="text-align: center; margin-bottom: 20px;">
-    <!-- ⚠️ 请把下面的 src 链接替换为你真实的 GitHub Raw 图片链接 -->
+    <!-- ⚠️ 请把下面的 src 链接替换为你真实的 GitHub Raw 图片链接（压缩后） -->
     <img src="https://raw.githubusercontent.com/xbbopen/smart-crumbs/main/banner.png" 
          alt="牛来参谋长" 
+         loading="lazy" decoding="async"
          style="width: 100%; max-width: 800px; height: auto; border-radius: 12px; display: block; margin: 0 auto; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
 </div>
 """
