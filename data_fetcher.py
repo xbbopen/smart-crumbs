@@ -222,13 +222,14 @@ def build_market_data(symbol, asset_type):
                 md["day_volume"] = metrics["day_volume"]
                 fr = metrics["funding_rate"]
                 if fr is not None:
+                    # 修复：允许负费率（映射为0），正数按0.01%为100%映射
                     if fr <= 0:
                         md["funding_percentile"] = 0.0
                     else:
-                        md["funding_percentile"] = min(1.0, fr / 0.01)rate"] / 0.01))
+                        md["funding_percentile"] = min(1.0, fr / 0.01)
             return md
         else:
-            # 🚀 核心修复：合约拿不到数据，触发降级拿现货
+            # 🚀 核心降级逻辑：合约拿不到数据，触发降级拿现货
             log.warning(f"[{symbol}] 合约数据获取失败，触发降级：尝试拿现货数据")
             klines = fetch_binance_spot_klines(symbol)
             source = "币安镜像 现货（合约降级）"
@@ -236,7 +237,7 @@ def build_market_data(symbol, asset_type):
                 klines = fetch_gateio_spot_klines(symbol)
                 source = "Gate.io 现货（合约降级）"
             if not klines:
-                klines = fetch_hyperliquid_klines(symbol)  # 虽然叫hl，但当作最后兜底
+                klines = fetch_hyperliquid_klines(symbol)
                 source = "Hyperliquid 现货（合约降级）"
             
             if klines:
@@ -247,7 +248,6 @@ def build_market_data(symbol, asset_type):
                     "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines),
                     "data_source": source
                 })
-                # 现货降级后，没有资金费率，保持 funding_rate 为 None 即可（策略已兼容）
                 return md
             else:
                 md["fetch_status"] = "unsupported"
