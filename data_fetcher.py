@@ -222,14 +222,15 @@ def build_market_data(symbol, asset_type):
                 md["day_volume"] = metrics["day_volume"]
                 fr = metrics["funding_rate"]
                 if fr is not None:
-                    # 修复：允许负费率（映射为0），正数按0.01%为100%映射
-                    if fr <= 0:
-                        md["funding_percentile"] = 0.0
+                    # 🚀 修正：允许负费率（映射为负百分位），正数按0.01%为100%映射
+                    if fr <= -0.005:
+                        md["funding_percentile"] = -1.0  # 极度空头拥挤
+                    elif fr <= 0:
+                        md["funding_percentile"] = fr / 0.01  # 负值映射为负百分位
                     else:
                         md["funding_percentile"] = min(1.0, fr / 0.01)
             return md
         else:
-            # 🚀 核心降级逻辑：合约拿不到数据，触发降级拿现货
             log.warning(f"[{symbol}] 合约数据获取失败，触发降级：尝试拿现货数据")
             klines = fetch_binance_spot_klines(symbol)
             source = "币安镜像 现货（合约降级）"
@@ -239,7 +240,6 @@ def build_market_data(symbol, asset_type):
             if not klines:
                 klines = fetch_hyperliquid_klines(symbol)
                 source = "Hyperliquid 现货（合约降级）"
-            
             if klines:
                 md.update({
                     "klines": klines, "current_price": klines[-1]["close"],
