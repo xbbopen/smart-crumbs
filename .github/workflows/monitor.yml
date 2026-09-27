@@ -1,15 +1,14 @@
 name: 多标的合约监控
 
 on:
-  schedule:
-    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       strategy_override:
         description: '临时指定策略版本，如 v2_optimized'
         required: false
         default: ''
-
+  schedule:
+    - cron: '0 * * * *'
 jobs:
   monitor:
     runs-on: ubuntu-latest
