@@ -1,6 +1,6 @@
 """
 统一数据获取与指标计算模块
-- 合约：Hyperliquid
+- 合约：Hyperliquid（失败自动降级现货）
 - 现货：币安镜像优先 -> Gate.io -> Hyperliquid（最后兜底）
 """
 import time, requests
@@ -49,7 +49,6 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=150, start_ms=None, 
             return None
     if not all_klines:
         return None
-    # 去重排序
     seen = set()
     klines = []
     for item in all_klines:
@@ -125,9 +124,9 @@ def fetch_hyperliquid_klines(symbol, interval="30m", limit=150, start_ms=None, e
 
 def fetch_hyperliquid_metrics(symbol, current_price):
     coin = _hl_coin(symbol)
-    data = requests.post(HYPERLIQUID_INFO_URL, json={"type": "metaAndAssetCtxs"}, timeout=15).json()
-    if not data: return None
     try:
+        data = requests.post(HYPERLIQUID_INFO_URL, json={"type": "metaAndAssetCtxs"}, timeout=15).json()
+        if not data: return None
         meta, ctxs = data[0], data[1]
         for i, asset in enumerate(meta.get("universe", [])):
             if asset.get("name", "").upper() == coin:
@@ -192,23 +191,9 @@ def find_recent_low(klines, lookback=149):
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return min(k["low"] for k in subset)
 
-def calc_cvd(klines):
-    cvd = 0
-    series = []
-    for k in klines:
-        direction = 1 if k["close"] >= k["open"] else -1
-        cvd += k["volume"] * direction
-        series.append(cvd)
-    return series
 
-
-# ================= 构建 market_data =================
+# ================= 构建 market_data（核心降级逻辑） =================
 def build_market_data(symbol, asset_type):
-    """
-    按优先级获取数据：
-    - futures: 仅 Hyperliquid
-    - spot: 币安镜像 -> Gate.io -> Hyperliquid
-    """
     md = {
         "symbol": symbol, "asset_type": asset_type, "fetch_status": "ok",
         "klines": None, "klines_4h": None, "current_price": None,
@@ -222,16 +207,14 @@ def build_market_data(symbol, asset_type):
         klines = fetch_hyperliquid_klines(symbol)
         if klines:
             current_price = klines[-1]["close"]
-            md["klines"] = klines
-            md["current_price"] = current_price
-            md["klines_4h"] = fetch_hyperliquid_klines(symbol, interval="4h", limit=50)
-            md["ma10"] = calc_ma(klines, 10)
-            md["atr"] = calc_atr(klines, 14)
-            md["rsi"] = calc_rsi(klines, 14)
-            md["adx"] = calc_adx(klines, 14)
-            md["recent_high"] = find_recent_high(klines)
-            md["recent_low"] = find_recent_low(klines)
-            md["data_source"] = "Hyperliquid 合约"
+            md.update({
+                "klines": klines, "current_price": current_price,
+                "klines_4h": fetch_hyperliquid_klines(symbol, interval="4h", limit=50),
+                "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
+                "rsi": calc_rsi(klines, 14), "adx": calc_adx(klines, 14),
+                "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines),
+                "data_source": "Hyperliquid 合约"
+            })
             metrics = fetch_hyperliquid_metrics(symbol, current_price)
             if metrics:
                 md["funding_rate"] = metrics["funding_rate"]
@@ -241,52 +224,51 @@ def build_market_data(symbol, asset_type):
                     md["funding_percentile"] = min(1.0, max(0.0, metrics["funding_rate"] / 0.01))
             return md
         else:
-            md["fetch_status"] = "unsupported"
-            return md
+            # 🚀 核心修复：合约拿不到数据，触发降级拿现货
+            log.warning(f"[{symbol}] 合约数据获取失败，触发降级：尝试拿现货数据")
+            klines = fetch_binance_spot_klines(symbol)
+            source = "币安镜像 现货（合约降级）"
+            if not klines:
+                klines = fetch_gateio_spot_klines(symbol)
+                source = "Gate.io 现货（合约降级）"
+            if not klines:
+                klines = fetch_hyperliquid_klines(symbol)  # 虽然叫hl，但当作最后兜底
+                source = "Hyperliquid 现货（合约降级）"
+            
+            if klines:
+                md.update({
+                    "klines": klines, "current_price": klines[-1]["close"],
+                    "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
+                    "rsi": calc_rsi(klines, 14), "adx": calc_adx(klines, 14),
+                    "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines),
+                    "data_source": source
+                })
+                # 现货降级后，没有资金费率，保持 funding_rate 为 None 即可（策略已兼容）
+                return md
+            else:
+                md["fetch_status"] = "unsupported"
+                return md
 
     elif asset_type == "spot":
-        # 优先级1：币安镜像
         klines = fetch_binance_spot_klines(symbol)
+        source = "币安镜像 现货"
+        if not klines:
+            klines = fetch_gateio_spot_klines(symbol)
+            source = "Gate.io 现货"
+        if not klines:
+            klines = fetch_hyperliquid_klines(symbol)
+            source = "Hyperliquid 合约（现货兜底）"
         if klines:
-            md["klines"] = klines
-            md["current_price"] = klines[-1]["close"]
-            md["ma10"] = calc_ma(klines, 10)
-            md["atr"] = calc_atr(klines, 14)
-            md["rsi"] = calc_rsi(klines, 14)
-            md["adx"] = calc_adx(klines, 14)
-            md["recent_high"] = find_recent_high(klines)
-            md["recent_low"] = find_recent_low(klines)
-            md["data_source"] = "币安镜像 现货"
-            return md
-        # 优先级2：Gate.io
-        klines = fetch_gateio_spot_klines(symbol)
-        if klines:
-            md["klines"] = klines
-            md["current_price"] = klines[-1]["close"]
-            md["ma10"] = calc_ma(klines, 10)
-            md["atr"] = calc_atr(klines, 14)
-            md["rsi"] = calc_rsi(klines, 14)
-            md["adx"] = calc_adx(klines, 14)
-            md["recent_high"] = find_recent_high(klines)
-            md["recent_low"] = find_recent_low(klines)
-            md["data_source"] = "Gate.io 现货"
-            return md
-        # 优先级3：Hyperliquid 合约（兜底）
-        klines = fetch_hyperliquid_klines(symbol)
-        if klines:
-            md["klines"] = klines
-            md["current_price"] = klines[-1]["close"]
-            md["ma10"] = calc_ma(klines, 10)
-            md["atr"] = calc_atr(klines, 14)
-            md["rsi"] = calc_rsi(klines, 14)
-            md["adx"] = calc_adx(klines, 14)
-            md["recent_high"] = find_recent_high(klines)
-            md["recent_low"] = find_recent_low(klines)
-            md["data_source"] = "Hyperliquid 合约（现货降级）"
+            md.update({
+                "klines": klines, "current_price": klines[-1]["close"],
+                "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
+                "rsi": calc_rsi(klines, 14), "adx": calc_adx(klines, 14),
+                "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines),
+                "data_source": source
+            })
             return md
         md["fetch_status"] = "unsupported"
         return md
-
     else:
         md["fetch_status"] = "unsupported"
         return md
