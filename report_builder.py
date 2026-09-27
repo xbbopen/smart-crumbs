@@ -19,7 +19,7 @@ CONDITION_EXPLANATIONS = {
     "3.2-RSI超卖": "是否跌到了极度恐慌（散户割肉离场）",
     "3.3-CVD牛背离": "底背离！价格在跌，但主力资金已经在暗中吸筹",
     "市场状态": "当前市场是否具备单边行情的土壤（ADX趋势过滤）",
-    "硬条件-4H": "大趋势是否顺风（4小时级别方向）",
+    "硬条件-4H趋势": "大趋势是否顺风（4小时级别方向）",
     "硬条件-费率": "资金费率是否到了引爆点",
     "数据不足": "数据源获取失败（跳过本次推演）"
 }
@@ -34,7 +34,6 @@ SIGNAL_GLOSSARY = {
     "4H趋势过滤": "逆势做单，死路一条。4小时方向不对，坚决不碰。",
 }
 
-# ================= 极具煽动性和人设的广告位 =================
 AD_BANNER = """
 <div style="background: linear-gradient(135deg, #1e130c 0%, #9a8478 100%); color: white; padding: 25px; border-radius: 12px; text-align: center; margin-bottom: 20px; box-shadow: 0 10px 20px rgba(0,0,0,0.3);">
     <h1 style="margin: 0; font-size: 32px; letter-spacing: 3px; text-shadow: 2px 2px 4px #000;">🐮 牛来参谋长</h1>
@@ -65,6 +64,64 @@ def calc_trade_plan(direction, cp, atr, rh, rl):
         plan["coin_amount"] = pos_val / cp if cp else 0
     return plan
 
+# ================= 🚀 新增：参谋长专属点评引擎 =================
+def generate_commander_comment(r, is_triggered):
+    """根据标的数据，生成一段极具煽动性的参谋长点评"""
+    md = r.get("market_data", {})
+    sr_list = r.get("strategy_results", {})
+    cp = r.get("current_price")
+    rsi = md.get("rsi")
+    adx = md.get("adx")
+    fr = md.get("funding_rate")
+    fp = md.get("funding_percentile")
+    
+    # 找出得分最高或已触发的策略结果
+    best_sr = None
+    max_score = -1
+    for sname, sr in sr_list.items():
+        if sr:
+            for tk in ["track_1", "track_2", "track_3"]:
+                score = sr.get(tk, {}).get("score", 0)
+                if score > max_score:
+                    max_score = score
+                    best_sr = sr
+
+    comment = ""
+    
+    # 1. 触发信号的点评（极度兴奋，强调机会与风控）
+    if is_triggered and best_sr:
+        direction = best_sr.get("direction")
+        if direction == "short":
+            comment = f"兄弟们，{r['symbol']} 主力磨刀霍霍了！RSI飙到{rsi:.1f}，资金费率百分位{fp:.0%}，多头极其拥挤。这种时候就是主力准备‘一锅端’的信号！参谋长已经扣动扳机，准备迎接瀑布。记住，带好2%止损，别让到嘴的肉飞了！"
+        elif direction == "long_rebound":
+            comment = f"黄金坑来了！{r['symbol']} 暴跌洗盘结束，RSI砸到{rsi:.1f}，散户都在恐慌割肉，但CVD底背离已经暴露了主力吸筹的阴谋！这种带血的筹码，参谋长笑纳了。直接进场，目标反弹，拿住就是胜利！"
+        elif direction == "long_trend":
+            comment = f"{r['symbol']} 蓄力完毕，主力点火起飞！站上MA10，动能温和，主力扫货痕迹明显。这波趋势我们要吃满！带好止损，让利润奔跑，参谋长带你感受火箭升空的快感！"
+        return f"<div style='background:#fff3cd; padding:12px; border-left:5px solid #e74c3c; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#c0392b; font-weight:bold;'>{comment}</span></div>"
+
+    # 2. 未触发信号的点评（冷静理智，指出隐患或等待机会）
+    if best_sr:
+        # 根据盘面情况给出不同点评
+        if adx is not None and adx < 20:
+            comment = f"{r['symbol']} 现在ADX只有{adx:.1f}，主力在高度控盘，上下乱插针就是要把散户震出去。这种无序震荡，进去就是送人头。参谋长建议：管住手，等趋势明朗再动手！"
+        elif rsi is not None and rsi >= 70:
+            comment = f"注意风险！{r['symbol']} RSI高达{rsi:.1f}，价格已经在高位了。别被FOMO情绪冲昏头脑，现在追多就是接盘侠。参谋长在等它见顶信号，准备反手做空！"
+        elif rsi is not None and rsi <= 35:
+            comment = f"机会在酝酿！{r['symbol']} RSI已经砸到{rsi:.1f}，极度恐慌区。虽然还没到参谋长的开枪点位，但子弹已经上膛。一旦确认企稳，这里就是暴利反弹的起点！"
+        elif fp is not None and fp >= 0.8:
+            comment = f"{r['symbol']} 资金费率拥挤度达到了{fp:.0%}，多头太嗨了，这种时候往往危险。参谋长虽然暂时没开枪，但已经在找机会布局空单，准备收割这群狂欢的韭菜。"
+        else:
+            # 通用等待文案
+            if max_score == 3:
+                comment = f"马上要触发了！{r['symbol']} 各项指标都在临界点，主力意图已经暴露，参谋长正在死死盯盘。兄弟们保持关注，只要条件达标，我立马通知你们进场！"
+            elif max_score == 2:
+                comment = f"{r['symbol']} 盘面暗流涌动，虽然还没完全达标，但主力的小动作已经藏不住了。耐心是猎人最好的品质，等参谋长信号，我们一起精准狙击。"
+            else:
+                comment = f"{r['symbol']} 目前处于垃圾时间，各项指标都不达标，主力还在洗盘。参谋长从不打无准备之仗，空仓休息也是一种操作，等信号出来，我第一时间喊单！"
+    
+    return f"<div style='background:#f8f9fa; padding:12px; border-left:5px solid #3498db; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#2c3e50;'>{comment}</span></div>"
+
+# ================= 触发信号板块 =================
 def build_triggered_section(results):
     html = "<h3 style='color:#e74c3c; border-left:5px solid #e74c3c; padding-left:10px; font-size:22px;'>🚨 参谋长开枪警告（引爆行情）</h3>"
     found = False
@@ -103,12 +160,17 @@ def build_triggered_section(results):
             html += f"<li><b>实操落地：</b>以10000U本金、10倍杠杆为例，投入保证金{plan['margin_10x']:.2f}U，开仓{plan['coin_amount']:.4f}个{r['symbol'].replace('_USDT','')}。</li>"
             if cp: html += f"<li><b>止盈目标1（浮盈20%）：</b>${cp * 1.2}（先保本）</li><li><b>止盈目标2（浮盈50%）：</b>${cp * 1.5}（分批落袋）</li>"
             if ma10: html += f"<li><b>MA10动态离场线：</b>${ma10}（跌破立刻清仓）</li>"
-            html += "</ul></div></div>"
+            html += "</ul></div>"
+            
+            # 插入参谋长解读
+            html += generate_commander_comment(r, is_triggered=True)
+            html += "</div>"
 
     if not found:
         html += "<p style='color:#888; padding:10px; font-size:16px;'>🛡️ 当前主力还在洗盘，无明确开枪信号。参谋长正在紧盯盘面，兄弟们切勿盲目进场！</p>"
     return html
 
+# ================= 未触发信号板块 =================
 def build_untriggered_section(results):
     html = "<hr><h3 style='color:#27ae60; border-left:5px solid #27ae60; padding-left:10px; font-size:20px;'>🔮 参谋长盘面推演（未触发，但暗流涌动）</h3>"
     html += "<p style='color:#666; font-size:0.95em;'>以下是参谋长对当前盘面的全面推演。虽然还没到开枪时机，但主力的意图已经写在盘面上：</p>"
@@ -122,8 +184,14 @@ def build_untriggered_section(results):
         cp = r.get("current_price")
         html += f"<div style='border:1px solid #ddd; padding:12px; margin-bottom:15px; border-radius:5px; background:#fafafa;'>"
         html += f"<h4 style='margin-top:0; color:#2c3e50;'>📌 {r['symbol']} ({translate_asset_type(r.get('asset_type'))}) | 现价：${cp} | 数据源：{md.get('data_source')}</h4>"
-        if md.get("open_interest"):
-            html += f"<p style='color:#e67e22; font-weight:bold;'>💡 参谋长流动性建议：{get_leverage_advice(md.get('open_interest'))}（24h成交额：{md.get('day_volume')}）</p>"
+        
+        # 原始费率展示
+        fr = md.get("funding_rate")
+        fp = md.get("funding_percentile")
+        if fr is not None:
+            html += f"<p style='color:#e67e22; font-weight:bold;'>💡 当前资金费率：{fr:.5f}% （百分位：{fp:.0%}） | 流动性建议：{get_leverage_advice(md.get('open_interest'))}</p>"
+        else:
+            html += f"<p style='color:#e67e22; font-weight:bold;'>💡 流动性建议：{get_leverage_advice(md.get('open_interest'))}（24h成交额：{md.get('day_volume')}）</p>"
         
         for sname, sr in r.get("strategy_results", {}).items():
             if not sr: continue
@@ -132,7 +200,7 @@ def build_untriggered_section(results):
             
             for tk, tn in [("track_1","🚀 底部突破做多"),("track_2","🔪 见顶做空"),("track_3","🩸 暴跌反弹做多")]:
                 ta = sr.get(tk, {})
-                hard = "✅ 硬条件通过" if ta.get("hard_ok") else "❌ 硬条件未过（主力设下陷阱）"
+                hard = "✅ 硬条件通过" if ta.get("hard_ok") else "❌ 硬条件未过"
                 score = ta.get('score', 0)
                 max_score = 4 if tk in ['track_1','track_2'] else 3
                 
@@ -146,9 +214,10 @@ def build_untriggered_section(results):
                         exp_str = f" <span style='color:#999;'>（💡 参谋长：{exp}）</span>" if exp else ""
                         html += f"<li><b>{k}:</b> {v}{exp_str}</li>"
                     html += "</ul>"
-                else:
-                    html += "<p style='color:#999; font-size:0.85em;'>主力高度控盘，暂无详细数据</p>"
             html += "</div>"
+            
+        # 插入参谋长解读
+        html += generate_commander_comment(r, is_triggered=False)
         html += "</div>"
     return html
 
@@ -179,7 +248,6 @@ def build_report(results, active_strategies, watchlist):
         for sr in r.get("strategy_results", {}).values()
     )
     
-    # 在标题上直接制造悬念和话题
     if any_triggered:
         subject = f"🚨【参谋长战报】主力动手了！发现暴力做单机会！速看！"
     else:
