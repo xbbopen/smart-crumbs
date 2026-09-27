@@ -52,8 +52,11 @@ def fetch_klines_for_backtest(symbol, asset_type, interval, limit, start_ms, end
 
 def run_single(strategy_name, symbol, asset_type, interval, limit, capital, fee, start_ms, end_ms):
     klines, data_mode, data_source = fetch_klines_for_backtest(symbol, asset_type, interval, limit, start_ms, end_ms)
-    if not klines or len(klines) < 200:
-        print(f"⚠️ {symbol} 数据不足")
+    if not klines:
+        print(f"⚠️ {symbol} [{asset_type}] API请求失败或数据为空。请检查符号格式。")
+        return None
+    if len(klines) < 200:
+        print(f"⚠️ {symbol} 数据不足（仅{len(klines)}根，需≥200根），请拉长回测区间或增大limit。")
         return None
 
     strategy = load_strategy(strategy_name)
@@ -77,7 +80,7 @@ def run_single(strategy_name, symbol, asset_type, interval, limit, capital, fee,
         }
         try:
             res = strategy.evaluate(symbol, asset_type, md)
-        except:
+        except Exception as e:
             continue
         cp = window[-1]["close"]
         if res.get("triggered") and position is None:
@@ -147,7 +150,7 @@ def main():
             time.sleep(2)
 
     if not all_reports:
-        print("无有效回测结果")
+        print("无有效回测结果，请检查上面的错误日志。")
         return
 
     # 构建邮件
