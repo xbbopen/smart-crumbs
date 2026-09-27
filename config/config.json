@@ -1,47 +1,19 @@
 {
-  "active_strategy": "v1_default",
-  "shadow_strategies": ["v2_optimized"],
+  "active_strategies": ["v1_default"],
   "notify_on_no_signal": true,
   "watchlist": [
-    {
-      "symbol": "ETC_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "ETH_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "BTW_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "BR_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "SAGA_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "CLANKER_USDT",
-      "type": "futures",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "ARK_USDT",
-      "type": "spot",
-      "strategy": "v1_default"
-    },
-    {
-      "symbol": "SOME_ALPHA",
-      "type": "alpha",
-      "strategy": "v1_default"
-    }
-  ]
+    { "symbol": "BTC_USDT", "type": "futures" },
+    { "symbol": "NEAR_USDT", "type": "futures" },
+    { "symbol": "ARK_USDT", "type": "futures" }
+  ],
+  "backtest_defaults": {
+    "strategies": ["v1_default"],
+    "symbols": ["BTC", "NEAR","ARK"],
+    "interval": "30m",
+    "limit": 1000,
+    "initial_capital": 10000,
+    "fee_rate": 0.0005,
+    "start_date": "",
+    "end_date": ""
+  }
 }
