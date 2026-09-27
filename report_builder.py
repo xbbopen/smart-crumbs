@@ -37,23 +37,48 @@ SIGNAL_GLOSSARY = {
     "4H趋势过滤": "逆势做单，死路一条。4小时方向不对，坚决不碰。",
 }
 
-# ================= 🚀 全新：币安官方UI风格头部 =================
-# 视觉设计思路：极简深灰背景 + 币安黄（#FCD535）点缀 + 现代无衬线字体
+# ================= 🚀 全新：币安风格 + 牛参谋长Logo + 丰富层次感头部 =================
+# 设计理念：
+# 1. 延续币安深色主题 (#181A20)，搭配币安黄 (#FCD535) 点缀，营造官方高级感。
+# 2. 引入内联SVG手绘的“戴军帽、架墨镜的牛头”形象，强化“牛来参谋长”IP。
+# 3. 通过背景光晕、多层字体阴影、圆角标签，打造极具冲击力的层次感。
 AD_BANNER = """
-<div style="background-color: #181A20; border-radius: 12px; padding: 30px 20px; text-align: center; border: 1px solid #2B3139; margin-bottom: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
-    <div style="margin-bottom: 15px;">
-        <!-- 极简Logo：币安风菱形/牛头抽象 -->
-        <svg width="60" height="60" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-            <path d="M50 15 L85 50 L50 85 L15 50 Z" fill="#FCD535" opacity="0.2"/>
-            <path d="M50 25 L75 50 L50 75 L25 50 Z" fill="none" stroke="#FCD535" stroke-width="4"/>
-            <circle cx="50" cy="50" r="6" fill="#FCD535"/>
+<div style="background-color: #181A20; border-radius: 16px; padding: 35px 20px 25px 20px; text-align: center; border: 1px solid #2B3139; margin-bottom: 25px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; position: relative; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.3);">
+    <!-- 背景装饰光晕，增加深度 -->
+    <div style="position: absolute; top: -80px; right: -80px; width: 200px; height: 200px; background: radial-gradient(circle, rgba(252,213,53,0.15) 0%, transparent 70%); border-radius: 50%; pointer-events: none;"></div>
+    <div style="position: absolute; bottom: -60px; left: -60px; width: 180px; height: 180px; background: radial-gradient(circle, rgba(252,213,53,0.1) 0%, transparent 70%); border-radius: 50%; pointer-events: none;"></div>
+
+    <!-- 1. 具象化Logo：戴着军帽、架着墨镜的酷牛参谋长 -->
+    <div style="display: inline-block; margin-bottom: 15px; position: relative; z-index: 2;">
+        <svg width="90" height="90" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+            <!-- 军帽 -->
+            <path d="M30 35 Q60 15 90 35 L95 45 L25 45 Z" fill="#2B3139" stroke="#FCD535" stroke-width="2"/>
+            <rect x="25" y="43" width="70" height="8" rx="2" fill="#FCD535"/>
+            <circle cx="60" cy="22" r="4" fill="#FCD535"/>
+            <!-- 牛头轮廓 -->
+            <path d="M35 45 Q20 50 25 75 Q30 100 60 105 Q90 100 95 75 Q100 50 85 45 Z" fill="#181A20" stroke="#FCD535" stroke-width="2"/>
+            <!-- 牛角 -->
+            <path d="M35 45 Q15 30 20 15" fill="none" stroke="#FCD535" stroke-width="4" stroke-linecap="round"/>
+            <path d="M85 45 Q105 30 100 15" fill="none" stroke="#FCD535" stroke-width="4" stroke-linecap="round"/>
+            <!-- 墨镜 (参谋长专属) -->
+            <rect x="35" y="55" width="50" height="15" rx="5" fill="#000" stroke="#FCD535" stroke-width="2"/>
+            <path d="M45 55 L45 70 M75 55 L75 70" stroke="#FCD535" stroke-width="1.5"/> <!-- 墨镜反光细节 -->
+            <!-- 鼻子 -->
+            <ellipse cx="60" cy="82" rx="8" ry="5" fill="#FCD535" opacity="0.8"/>
+            <!-- 帅气小胡须 -->
+            <path d="M45 95 Q60 100 75 95" fill="none" stroke="#FCD535" stroke-width="2" stroke-linecap="round"/>
         </svg>
     </div>
     
-    <h1 style="margin: 0; font-size: 32px; font-weight: 800; color: #FFFFFF; letter-spacing: 2px;">牛来参谋长</h1>
-    <p style="font-size: 15px; margin: 12px 0 8px 0; color: #848E9C; font-weight: 500;">专抓暴涨暴跌 · 做没有感情的赚钱机器</p>
-    <div style="display: inline-block; background-color: #2B3139; padding: 8px 16px; border-radius: 20px; margin-top: 10px;">
-        <p style="font-size: 14px; margin: 0; color: #FCD535; font-weight: 600;">怕踏空？怕被割？关注参谋长，一起埋伏主力！</p>
+    <!-- 2. 主标题：大字号，强对比 -->
+    <h1 style="margin: 0; font-size: 34px; font-weight: 900; color: #FFFFFF; letter-spacing: 3px; text-shadow: 0 4px 10px rgba(0,0,0,0.8); position: relative; z-index: 2;">牛来参谋长</h1>
+    
+    <!-- 3. 副标题：灰度，小字，与主标题形成层级对比 -->
+    <p style="font-size: 15px; margin: 10px 0 0 0; color: #848E9C; font-weight: 500; letter-spacing: 1px; position: relative; z-index: 2;">专抓暴涨暴跌 · 做没有感情的赚钱机器</p>
+    
+    <!-- 4. CTA标签：币安黄高亮，圆角胶囊样式，底层承托 -->
+    <div style="display: inline-block; background: linear-gradient(90deg, rgba(252,213,53,0.15) 0%, rgba(252,213,53,0.25) 100%); border: 1px solid rgba(252,213,53,0.4); padding: 10px 22px; border-radius: 30px; margin-top: 18px; position: relative; z-index: 2; box-shadow: 0 4px 15px rgba(252,213,53,0.1);">
+        <p style="font-size: 15px; margin: 0; color: #FCD535; font-weight: bold; letter-spacing: 0.5px;">怕踏空？怕被割？关注参谋长，一起埋伏主力！</p>
     </div>
 </div>
 """
