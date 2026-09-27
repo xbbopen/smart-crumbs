@@ -37,21 +37,16 @@ SIGNAL_GLOSSARY = {
 # ================= 🚀 全新：中式美学 + 专属Logo头部 =================
 AD_BANNER = """
 <div style="background: linear-gradient(135deg, #d32f2f 0%, #b71c1c 50%, #880e4f 100%); border-radius: 12px; padding: 30px 20px; color: #fff; text-align: center; border: 2px solid #ffc107; box-shadow: 0 10px 25px rgba(183,28,28,0.4); position: relative; overflow: hidden;">
-    <!-- 装饰光晕 -->
     <div style="position: absolute; top: -50px; left: -50px; width: 150px; height: 150px; background: rgba(255, 193, 7, 0.15); border-radius: 50%; filter: blur(30px);"></div>
     <div style="position: absolute; bottom: -50px; right: -50px; width: 150px; height: 150px; background: rgba(255, 193, 7, 0.15); border-radius: 50%; filter: blur(30px);"></div>
     
-    <!-- 牛来参谋长 专属Logo (内联SVG印章) -->
     <div style="display: inline-block; margin-bottom: 10px;">
         <svg width="70" height="70" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-            <!-- 印章外框 -->
             <rect x="5" y="5" width="90" height="90" rx="10" fill="#b71c1c" stroke="#ffc107" stroke-width="4"/>
-            <!-- 牛头标志 -->
             <path d="M30 40 Q50 20 70 40 L80 40 Q70 60 50 60 Q30 60 20 40 Z" fill="#ffc107"/>
             <circle cx="40" cy="35" r="3" fill="#b71c1c"/>
             <circle cx="60" cy="35" r="3" fill="#b71c1c"/>
             <path d="M45 45 Q50 50 55 45" fill="none" stroke="#b71c1c" stroke-width="3"/>
-            <!-- 文字 -->
             <text x="50" y="80" font-family="'STKaiti', 'KaiTi', sans-serif" font-size="22" fill="#ffc107" text-anchor="middle" font-weight="bold">参谋长</text>
         </svg>
     </div>
@@ -129,7 +124,6 @@ def generate_commander_comment(r, is_triggered):
             else: comment = f"{r['symbol']} 目前处于垃圾时间，各项指标都不达标，主力还在洗盘。参谋长从不打无准备之仗，空仓休息也是一种操作，等信号出来，我第一时间喊单！"
     return f"<div style='background:#f8f9fa; padding:12px; border-left:5px solid #3498db; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#2c3e50;'>{comment}</span></div>"
 
-# ================= 🚀 全新：标的独立卡片（黑金高亮设计） =================
 def build_symbol_block(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
@@ -161,7 +155,6 @@ def build_symbol_block(r):
 
     html = f"""
     <div style="border: 3px solid {border_color}; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); overflow: hidden;">
-        <!-- 标的专属头部 -->
         <div style="background: {header_bg}; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #ffc107;">
             <div>
                 <span style="font-size: 28px; font-weight: 900; letter-spacing: 2px; color: #ffd54f; text-shadow: 1px 1px 3px rgba(0,0,0,0.5);">💥 {r['symbol'].replace('_USDT','')}</span>
@@ -170,7 +163,6 @@ def build_symbol_block(r):
             <div style="background: {badge_bg}; color: {badge_color}; padding: 6px 15px; border-radius: 20px; font-weight: bold; font-size: 14px; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">{badge_text}</div>
         </div>
         
-        <!-- 核心数据概览 -->
         <div style="padding: 15px 20px; background: #f8f9fa; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; flex-wrap: wrap; font-size: 14px;">
             <div><b>当前价格：</b><span style="color: {border_color}; font-size: 1.2em; font-weight: bold;">${cp}</span></div>
             <div><b>数据源：</b>{md.get('data_source')}</div>
@@ -236,29 +228,28 @@ def build_symbol_block(r):
     return html
 
 def build_dashboard(results, triggered_list, untriggered_list):
-    """顶部导航：突显所有涉及的标的，让人一眼看到重点"""
     triggered_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
     untriggered_syms = [r['symbol'].replace('_USDT','') for r in untriggered_list if r.get("status") == "ok"]
     
     html = "<div style='background:#fff; border:2px solid #34495e; border-radius: 10px; padding: 15px; margin-bottom: 25px;'>"
     html += "<h3 style='margin-top:0; color:#2c3e50; border-bottom:2px dashed #eee; padding-bottom:10px;'>📋 本期监控全景图（直接定位你的标的）</h3>"
     
+    # 🚀 修复：使用 join 字符串，避免嵌套 f-string 带来的反斜杠报错
     if triggered_syms:
-        html += f"<p style='font-size: 16px; color: #e74c3c;'><b>🚨 触发信号：</b> {', '.join([f'<span style=\"background:#d32f2f;color:white;padding:3px 8px;border-radius:5px;font-weight:bold;margin:2px;\">{s}</span>' for s in triggered_syms])}</p>"
+        triggered_badges = "".join([f"<span style='background:#d32f2f;color:white;padding:3px 8px;border-radius:5px;font-weight:bold;margin:2px;'>{s}</span>" for s in triggered_syms])
+        html += f"<p style='font-size: 16px; color: #e74c3c;'><b>🚨 触发信号：</b> {triggered_badges}</p>"
     else:
         html += f"<p style='font-size: 16px; color: #888;'><b>🚨 触发信号：</b> 无，参谋长正在耐心等待。</p>"
         
     if untriggered_syms:
-        html += f"<p style='font-size: 14px; color: #555;'><b>🔮 盘面推演：</b> {', '.join([f'<span style=\"background:#ecf0f1;color:#2c3e50;padding:3px 8px;border-radius:5px;margin:2px;\">{s}</span>' for s in untriggered_syms])}</p>"
+        untriggered_badges = "".join([f"<span style='background:#ecf0f1;color:#2c3e50;padding:3px 8px;border-radius:5px;margin:2px;'>{s}</span>" for s in untriggered_syms])
+        html += f"<p style='font-size: 14px; color: #555;'><b>🔮 盘面推演：</b> {untriggered_badges}</p>"
         
     html += "</div>"
     return html
 
-# ================= 🚀 全新：极其丰富的动态标题池 =================
 def generate_dynamic_subject(triggered_list, untriggered_list, results):
-    """根据行情状态，从庞大的标题池中随机抽取，保证每天新鲜感"""
     tr_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
-    
     all_directions = []
     max_rsi, min_rsi = 0, 100
     max_fp = 0
@@ -278,85 +269,40 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results):
     is_short = any(d == "short" for d in all_directions)
     is_long = any(d.startswith("long") for d in all_directions)
 
-    # 1. 有信号触发（极高情绪价值）
     if triggered_list:
         if len(triggered_list) >= 2:
             return random.choice([
                 f"🚨【参谋长重磅战报】多空双杀！{', '.join(tr_syms[:3])}全线暴动！速看！",
                 f"🔥【牛来参谋长】冰火两重天！多币种触发信号，主力底牌已被看穿！",
-                f"💥【参谋长战报】大行情来了！{', '.join(tr_syms[:3])}齐爆，跟紧不迷路！",
-                f"🎯【牛来参谋长】绝佳机会！{', '.join(tr_syms[:3])}同时出现做单信号，跟上吃肉！"
+                f"💥【参谋长战报】大行情来了！{', '.join(tr_syms[:3])}齐爆，跟紧不迷路！"
             ])
         elif is_short and is_long:
             return random.choice([f"🚨【参谋长战报】多空双杀！主力露出獠牙，暴力行情一触即发！", f"🩸【牛来参谋长】一边逼空一边杀多，主力这波操作太狠了！"])
         elif is_short:
-            return random.choice([
-                f"🩸【参谋长战报】瀑布警告！主力磨刀霍霍，{tr_syms[0]}即将暴跌？", 
-                f"🔪【牛来参谋长】高位狂欢结束，{tr_syms[0]}即将一锅端！",
-                f"⚠️【参谋长预警】极度贪婪！{tr_syms[0]}费率爆表，收割倒计时已开启！",
-                f"💥【牛来参谋长】主力准备收割韭菜！{tr_syms[0]}空头子弹已上膛！"
-            ])
+            return random.choice([f"🩸【参谋长战报】瀑布警告！主力磨刀霍霍，{tr_syms[0]}即将暴跌？", f"🔪【牛来参谋长】高位狂欢结束，{tr_syms[0]}即将一锅端！", f"⚠️【参谋长预警】极度贪婪！{tr_syms[0]}费率爆表，收割倒计时已开启！"])
         else:
-            return random.choice([
-                f"🚀【参谋长战报】火箭点火！{tr_syms[0]}暴力拉升启动！", 
-                f"💥【牛来参谋长】{tr_syms[0]}蓄力完毕，完美站上支撑，准备迎接财富列车！",
-                f"🐮【参谋长预警】别踏空！{tr_syms[0]}突破在即，主力扫货痕迹明显！",
-                f"🎯【牛来参谋长】黄金坑！{tr_syms[0]}暴力反弹一触即发，跟上！"
-            ])
-    
-    # 2. 无信号触发（根据盘面特征制造悬念）
+            return random.choice([f"🚀【参谋长战报】火箭点火！{tr_syms[0]}暴力拉升启动！", f"💥【牛来参谋长】{tr_syms[0]}蓄力完毕，完美站上支撑，准备迎接财富列车！", f"🐮【参谋长预警】别踏空！{tr_syms[0]}突破在即，主力扫货痕迹明显！"])
     else:
-        # 2.1 ADX极低，震荡市
         if min_adx < 20:
-            return random.choice([
-                f"⚠️【参谋长推演】大盘死水微澜？主力正在密谋大动作，散户千万别乱动！",
-                f"🛡️【参谋长推演】ADX告急！主力高度控盘，此刻入场就是送人头！",
-                f"🧐【牛来参谋长】盘面毫无波澜？越是平静，主力憋的大招越狠！"
-            ])
-        # 2.2 RSI超买
+            return random.choice([f"⚠️【参谋长推演】大盘死水微澜？主力正在密谋大动作，散户千万别乱动！", f"🛡️【参谋长推演】ADX告急！主力高度控盘，此刻入场就是送人头！", f"🧐【牛来参谋长】盘面毫无波澜？越是平静，主力憋的大招越狠！"])
         elif max_rsi >= 70:
-            return random.choice([
-                f"🎈【参谋长预警】极度贪婪！RSI飙至{max_rsi:.0f}，主力随时准备一锅端！",
-                f"🔪【参谋长推演】散户狂欢倒计时？参谋长已经悄悄架好空单！",
-                f"🚨【牛来参谋长】RSI严重超买，这波追高的人，马上要吃苦头了！"
-            ])
-        # 2.3 RSI超卖
+            return random.choice([f"🎈【参谋长预警】极度贪婪！RSI飙至{max_rsi:.0f}，主力随时准备一锅端！", f"🔪【参谋长推演】散户狂欢倒计时？参谋长已经悄悄架好空单！", f"🚨【牛来参谋长】RSI严重超买，这波追高的人，马上要吃苦头了！"])
         elif min_rsi <= 35:
-            return random.choice([
-                f"🩸【参谋长推演】极度恐慌！RSI砸至{min_rsi:.0f}，黄金坑正在悄悄形成？",
-                f"💎【参谋长推演】带血的筹码满地都是，主力暗中吸筹，你慌了吗？",
-                f"🐮【牛来参谋长】别人恐惧我贪婪，{min_rsi:.0f}的RSI，反弹还会远吗？"
-            ])
-        # 2.4 费率拥挤
+            return random.choice([f"🩸【参谋长推演】极度恐慌！RSI砸至{min_rsi:.0f}，黄金坑正在悄悄形成？", f"💎【参谋长推演】带血的筹码满地都是，主力暗中吸筹，你慌了吗？", f"🐮【牛来参谋长】别人恐惧我贪婪，{min_rsi:.0f}的RSI，反弹还会远吗？"])
         elif max_fp >= 0.8:
-            return random.choice([
-                f"💥【参谋长推演】资金费率极度拥挤，多头太嗨了，瀑布随时降临！",
-                f"⚠️【参谋长预警】费率爆表！主力准备收割韭菜，空头子弹已上膛！",
-                f"🌪️【牛来参谋长】多头拥挤度{max_fp:.0%}，这是主力最爱的猎杀时刻！"
-            ])
-        # 2.5 常规等待
+            return random.choice([f"💥【参谋长推演】资金费率极度拥挤，多头太嗨了，瀑布随时降临！", f"⚠️【参谋长预警】费率爆表！主力准备收割韭菜，空头子弹已上膛！", f"🌪️【牛来参谋长】多头拥挤度{max_fp:.0%}，这是主力最爱的猎杀时刻！"])
         else:
-            return random.choice([
-                f"🔮【参谋长推演】主力正在密谋大动作？多空博弈白热化，散户请警惕！",
-                f"🐮【参谋长推演】盘面暗流涌动，参谋长锁定猎物，等一个开枪信号！",
-                f"🛡️【参谋长推演】没有感情的赚钱机器正在盯盘，主力意图已经暴露...",
-                f"🧐【牛来参谋长】耐心是猎人最好的品质，别急，让子弹飞一会！"
-            ])
+            return random.choice([f"🔮【参谋长推演】主力正在密谋大动作？多空博弈白热化，散户请警惕！", f"🐮【参谋长推演】盘面暗流涌动，参谋长锁定猎物，等一个开枪信号！", f"🛡️【参谋长推演】没有感情的赚钱机器正在盯盘，主力意图已经暴露..."])
 
 def build_report(results, active_strategies, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
-    
-    # 标的级别去重
     triggered_list = []
     untriggered_list = []
     for r in results:
         has_triggered = any(sr and sr.get("triggered") for sr in r.get("strategy_results", {}).values())
-        if has_triggered:
-            triggered_list.append(r)
-        else:
-            untriggered_list.append(r)
+        if has_triggered: triggered_list.append(r)
+        else: untriggered_list.append(r)
 
-    # 生成动态标题
     subject = generate_dynamic_subject(triggered_list, untriggered_list, results)
 
     html = f"<html><body style='font-family:Arial,sans-serif;max-width:900px;margin:0 auto;color:#333;padding:10px; background-color:#f4f6f8;'>"
@@ -364,25 +310,19 @@ def build_report(results, active_strategies, watchlist):
     html += f"<div style='background:white; padding:20px; border-radius:10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);'>"
     html += f"<h2 style='border-bottom: 3px solid #e74c3c; padding-bottom: 10px; color:#2c3e50;'>📊 参谋长多策略监控报告</h2>"
     html += f"<p style='color:#666;'><b>时间：</b>{now} | <b>策略：</b>{', '.join(active_strategies)} | <b>数据源：</b>多源智能降级</p>"
-    
-    # 插入导航
     html += build_dashboard(results, triggered_list, untriggered_list)
 
-    # 按币种独立输出
     if triggered_list:
         html += "<h3 style='color:#e74c3c; border-left:5px solid #e74c3c; padding-left:10px; font-size:22px; margin-top:30px;'>🚨 参谋长开枪警告（引爆行情）</h3>"
-        for r in triggered_list:
-            html += build_symbol_block(r)
+        for r in triggered_list: html += build_symbol_block(r)
     
     if untriggered_list:
         html += "<hr><h3 style='color:#27ae60; border-left:5px solid #27ae60; padding-left:10px; font-size:20px; margin-top:30px;'>🔮 参谋长盘面推演（未触发，但暗流涌动）</h3>"
-        for r in untriggered_list:
-            html += build_symbol_block(r)
+        for r in untriggered_list: html += build_symbol_block(r)
 
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    
     html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 觉得有用？点赞、转发、关注“牛来参谋长”，带你一起埋伏主力！</p>"
     html += "</div></body></html>"
     return subject, html
@@ -402,7 +342,6 @@ def build_glossary_section():
     html += "</div>"
     return html
 
-# ================= 🚀 全新：中式美学结尾风险声明 =================
 def build_risk_warning():
     return """
 <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d1b1b 100%); color: #e0e0e0; padding: 25px; border-radius: 12px; margin-top: 25px; border: 1px solid #4a2c2c; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
