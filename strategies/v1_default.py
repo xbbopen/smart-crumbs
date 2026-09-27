@@ -5,12 +5,17 @@ class V1DefaultStrategy(BaseStrategy):
     name = "参谋长强化版三轨策略"
 
     def evaluate(self, symbol, asset_type, market_data):
+        # 判断当前是合约模式还是现货模式
+        is_spot_mode = market_data.get("data_mode") == "spot"
+
         result = {
             "track_1": {"score": 0, "details": {}, "hard_ok": False},
             "track_2": {"score": 0, "details": {}, "hard_ok": False},
             "track_3": {"score": 0, "details": {}, "hard_ok": False},
-            "triggered": False, "direction": None, "reason": ""
+            "triggered": False, "direction": None, "reason": "",
+            "data_mode": "spot" if is_spot_mode else "futures"
         }
+
         price = market_data.get("current_price")
         rsi = market_data.get("rsi")
         ma10 = market_data.get("ma10")
@@ -38,6 +43,12 @@ class V1DefaultStrategy(BaseStrategy):
             ma20_4h = sum(k["close"] for k in klines_4h[-20:]) / 20
             trend_4h = "up" if price > ma20_4h else "down"
 
+        # 现货模式提示
+        if is_spot_mode:
+            result["track_1"]["details"]["数据模式"] = "🟢 现货分析模式（无资金费率、无OI）"
+            result["track_2"]["details"]["数据模式"] = "🟢 现货分析模式（做空降级为逃顶预警）"
+            result["track_3"]["details"]["数据模式"] = "🟢 现货分析模式（无资金费率、无OI）"
+
         cvd_series = []
         if klines:
             cvd = 0
@@ -51,29 +62,25 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             result["track_1"]["hard_ok"] = True
             result["track_1"]["details"]["硬条件-4H趋势"] = "✅ 4H趋势向上或震荡，允许做多"
-            
-            # 1.1 底部区域
+
             if price <= rl * 1.05:
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["1.1-底部区域"] = f"✅ 已满足: 现价{price}，低点{rl}"
             else:
                 result["track_1"]["details"]["1.1-底部区域"] = f"❌ 未满足: 现价{price} 高于低点{rl}的1.05倍"
 
-            # 1.2 站上MA10
             if ma10 and price > ma10:
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["1.2-站上MA10"] = f"✅ 已满足: {price} > MA10({ma10})"
             else:
                 result["track_1"]["details"]["1.2-站上MA10"] = f"❌ 未满足: 现价{price} < MA10({ma10})"
 
-            # 1.3 RSI温和
             if 45 <= rsi <= 65:
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["1.3-RSI温和"] = f"✅ 已满足: RSI={rsi:.1f} 在45-65区间"
             else:
                 result["track_1"]["details"]["1.3-RSI温和"] = f"❌ 未满足: RSI={rsi:.1f} 不在45-65区间"
 
-            # 1.4 放量确认
             if klines and len(klines) >= 10:
                 recent_low_vol = min(k["volume"] for k in klines[-10:])
                 if klines[-1]["volume"] > recent_low_vol * 1.5:
@@ -84,31 +91,33 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_1"]["details"]["1.4-放量确认"] = "❌ 数据不足，无法判断"
 
-        # ================= 轨道2：见顶做空 =================
+        # ================= 轨道2：见顶做空（现货模式下自动降级为逃顶预警） =================
         if trend_4h == "up":
             result["track_2"]["details"]["硬条件-4H趋势"] = "❌ 4H趋势向上，禁止做空"
-        elif fp is not None and fp < 0.80:
+        elif not is_spot_mode and fp is not None and fp < 0.80:
             result["track_2"]["details"]["硬条件-费率"] = f"❌ 费率百分位{fp:.0%} < 80%，多头拥挤度不够"
         else:
             result["track_2"]["hard_ok"] = True
             result["track_2"]["details"]["硬条件-4H趋势"] = "✅ 4H趋势向下或震荡，允许做空"
-            result["track_2"]["details"]["硬条件-费率"] = f"✅ 费率百分位{fp:.0%} ≥ 80%，多头拥挤"
-            
-            # 2.1 逼近高点
+
+            # 现货模式跳过资金费率硬条件
+            if is_spot_mode:
+                result["track_2"]["details"]["硬条件-费率"] = "🟢 现货模式，跳过费率判断"
+            else:
+                result["track_2"]["details"]["硬条件-费率"] = f"✅ 费率百分位{fp:.0%} ≥ 80%，多头拥挤"
+
             if price >= rh * 0.97:
                 result["track_2"]["score"] += 1
                 result["track_2"]["details"]["2.1-逼近高点"] = f"✅ 已满足: {price} 接近 {rh}"
             else:
                 result["track_2"]["details"]["2.1-逼近高点"] = f"❌ 未满足: 距离高点还有{((rh-price)/rh*100):.1f}%空间"
 
-            # 2.2 RSI超买
             if rsi >= 70:
                 result["track_2"]["score"] += 1
                 result["track_2"]["details"]["2.2-RSI超买"] = f"✅ 已满足: RSI={rsi:.1f} ≥ 70"
             else:
                 result["track_2"]["details"]["2.2-RSI超买"] = f"❌ 未满足: RSI={rsi:.1f} < 70"
 
-            # 2.3 CVD熊背离
             if cvd_series and len(cvd_series) >= 10:
                 high_now = max(k["high"] for k in klines[-3:])
                 high_prev = max(k["high"] for k in klines[-10:-3])
@@ -122,12 +131,14 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_2"]["details"]["2.3-CVD熊背离"] = "❌ 数据不足，无法判断"
 
-            # 2.4 费率极值
-            if fp is not None and fp >= 0.90:
+            # 现货模式跳过费率极值条件
+            if is_spot_mode:
+                result["track_2"]["details"]["2.4-费率极值"] = "🟢 现货模式，此条件不适用"
+            elif fp is not None and fp >= 0.90:
                 result["track_2"]["score"] += 1
                 result["track_2"]["details"]["2.4-费率极值"] = f"✅ 已满足: 费率百分位{fp:.0%} ≥ 90%"
             else:
-                result["track_2"]["details"]["2.4-费率极值"] = f"❌ 未满足: 费率百分位{fp:.0%} < 90%"
+                result["track_2"]["details"]["2.4-费率极值"] = f"❌ 未满足: 费率百分位{fp if fp is not None else 0:.0%} < 90%"
 
         # ================= 轨道3：暴跌反弹做多 =================
         if trend_4h == "down":
@@ -135,22 +146,19 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             result["track_3"]["hard_ok"] = True
             result["track_3"]["details"]["硬条件-4H趋势"] = "✅ 4H趋势向上或震荡，允许抄底"
-            
-            # 3.1 大幅回撤
+
             if price <= rh * 0.85:
                 result["track_3"]["score"] += 1
                 result["track_3"]["details"]["3.1-大幅回撤"] = f"✅ 已满足: 回撤{((rh-price)/rh*100):.1f}% ≥ 15%"
             else:
                 result["track_3"]["details"]["3.1-大幅回撤"] = f"❌ 未满足: 当前回撤{((rh-price)/rh*100):.1f}% < 15%"
 
-            # 3.2 RSI超卖
             if rsi <= 35:
                 result["track_3"]["score"] += 1
                 result["track_3"]["details"]["3.2-RSI超卖"] = f"✅ 已满足: RSI={rsi:.1f} ≤ 35"
             else:
                 result["track_3"]["details"]["3.2-RSI超卖"] = f"❌ 未满足: RSI={rsi:.1f} > 35"
 
-            # 3.3 CVD牛背离
             if cvd_series and len(cvd_series) >= 10:
                 low_now = min(k["low"] for k in klines[-3:])
                 low_prev = min(k["low"] for k in klines[-10:-3])
@@ -165,10 +173,15 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_3"]["details"]["3.3-CVD牛背离"] = "❌ 数据不足，无法判断"
 
         # ================= 触发判定 =================
+        # 现货模式下，轨道2的触发改为"spot_warning"（逃顶预警），而不是做空
         if result["track_2"]["hard_ok"] and result["track_2"]["score"] >= 3:
             result["triggered"] = True
-            result["direction"] = "short"
-            result["reason"] = f"见顶做空条件 {result['track_2']['score']}/4 触发"
+            if is_spot_mode:
+                result["direction"] = "spot_warning"
+                result["reason"] = f"现货逃顶预警 {result['track_2']['score']}/4 触发（建议减仓，不做空）"
+            else:
+                result["direction"] = "short"
+                result["reason"] = f"见顶做空条件 {result['track_2']['score']}/4 触发"
         elif result["track_3"]["hard_ok"] and result["track_3"]["score"] >= 3:
             result["triggered"] = True
             result["direction"] = "long_rebound"
@@ -177,4 +190,5 @@ class V1DefaultStrategy(BaseStrategy):
             result["triggered"] = True
             result["direction"] = "long_trend"
             result["reason"] = f"底部突破条件 {result['track_1']['score']}/4 触发"
+
         return result
