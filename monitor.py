@@ -13,7 +13,6 @@ BJT = timezone(timedelta(hours=8))
 
 # ================= 全局格式化工具 =================
 def fmt_price(price):
-    """统一价格展示格式：<1保留4位小数，1~99保留2位，>=100取整"""
     if price is None: return "N/A"
     p = float(price)
     if p < 1: return f"${p:.4f}"
@@ -49,14 +48,12 @@ def fetch_hyperliquid_klines(symbol: str, interval: str = "30m", limit: int = 15
     start_ms = now_ms - (limit * 30 * 60 * 1000)
     data = hyperliquid_post({"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start_ms, "endTime": now_ms}})
     if not data or not isinstance(data, list):
-        log.info(f"[{symbol}] Hyperliquid 未返回数据（coin={coin}），可能未上线")
         return None
     klines = [{"timestamp": item["t"], "open": float(item["o"]), "high": float(item["h"]), "low": float(item["l"]), "close": float(item["c"]), "volume": float(item["v"])} for item in data]
     log.info(f"Hyperliquid K线获取成功: {symbol} (coin={coin}), 共 {len(klines)} 根")
     return klines
 
 def fetch_hyperliquid_metrics(symbol: str, current_price: float):
-    """获取资金费率、未平仓合约量（OI，转换为美元）"""
     coin = symbol_to_coin(symbol)
     data = hyperliquid_post({"type": "metaAndAssetCtxs"})
     if not data: return None
@@ -66,11 +63,10 @@ def fetch_hyperliquid_metrics(symbol: str, current_price: float):
             if asset.get("name", "").upper() == coin:
                 ctx = ctxs[i] if i < len(ctxs) else {}
                 oi_coins = float(ctx.get("openInterest", 0))
-                # 核心修复：Hyperliquid返回的是币的数量，需要乘以当前价格转换为美元价值
                 oi_usd = oi_coins * current_price
                 return {
                     "funding_rate": float(ctx.get("funding", 0)),
-                    "open_interest": oi_usd,  # 已转换为美元
+                    "open_interest": oi_usd,
                     "day_volume": float(ctx.get("dayNtlVlm", 0))
                 }
     except Exception as e:
@@ -119,29 +115,57 @@ def find_recent_low(klines, lookback=149):
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return min(k["low"] for k in subset)
 
-# ================= 数据构建 =================
+# ================= 数据构建（核心降级逻辑） =================
 def build_market_data(symbol, asset_type):
     market_data = {"symbol": symbol, "asset_type": asset_type, "fetch_status": "ok", "klines": None, "current_price": None, "funding_rate": None, "open_interest": None, "day_volume": None, "ma10": None, "atr": None, "rsi": None, "recent_high": None, "recent_low": None, "data_source": "Unknown"}
     
     if asset_type == "futures":
+        # 1. 首选 Hyperliquid 合约
         klines = fetch_hyperliquid_klines(symbol)
-        if not klines:
-            market_data["fetch_status"] = "unsupported"
+        if klines:
+            current_price = klines[-1]["close"]
+            market_data.update({
+                "klines": klines, "current_price": current_price,
+                "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
+                "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines),
+                "recent_low": find_recent_low(klines), "data_source": "Hyperliquid 合约"
+            })
+            metrics = fetch_hyperliquid_metrics(symbol, current_price)
+            if metrics:
+                market_data["funding_rate"] = metrics["funding_rate"]
+                market_data["open_interest"] = metrics["open_interest"]
+                market_data["day_volume"] = metrics["day_volume"]
             return market_data
-        current_price = klines[-1]["close"]
-        market_data.update({"klines": klines, "current_price": current_price, "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14), "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines), "data_source": "Hyperliquid"})
-        metrics = fetch_hyperliquid_metrics(symbol, current_price)
-        if metrics:
-            market_data["funding_rate"] = metrics["funding_rate"]
-            market_data["open_interest"] = metrics["open_interest"]
-            market_data["day_volume"] = metrics["day_volume"]
+        
+        # 2. 降级到 Gate.io 现货
+        log.warning(f"[{symbol}] Hyperliquid 获取失败，尝试降级到 Gate.io 现货")
+        klines = fetch_gateio_spot_klines(symbol)
+        if klines:
+            market_data.update({
+                "klines": klines, "current_price": klines[-1]["close"],
+                "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
+                "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines),
+                "recent_low": find_recent_low(klines), "data_source": "Gate.io 现货 (降级)"
+            })
+            # 现货没有资金费率，保持为 None
+            return market_data
+            
+        # 3. 两者都失败
+        log.warning(f"[{symbol}] Hyperliquid 和 Gate.io 均无数据，标记为不支持")
+        market_data["fetch_status"] = "unsupported"
+        return market_data
 
     elif asset_type == "spot":
         klines = fetch_gateio_spot_klines(symbol)
         if not klines:
             market_data["fetch_status"] = "fetch_failed"
             return market_data
-        market_data.update({"klines": klines, "current_price": klines[-1]["close"], "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14), "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines), "data_source": "Gate.io 现货"})
+        market_data.update({
+            "klines": klines, "current_price": klines[-1]["close"],
+            "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
+            "rsi": calc_rsi(klines, 14), "recent_high": find_recent_high(klines),
+            "recent_low": find_recent_low(klines), "data_source": "Gate.io 现货"
+        })
     else:
         market_data["fetch_status"] = "unsupported"
     return market_data
@@ -179,7 +203,6 @@ def main():
 def build_email_html(results, active_strategy_name, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     
-    # 广告位（置顶）
     ad_banner = """
     <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
         <h1 style="margin: 0; font-size: 28px; letter-spacing: 2px;">🐮 牛来参谋长</h1>
@@ -222,8 +245,9 @@ def build_email_html(results, active_strategy_name, watchlist):
             cp = r.get("current_price")
             atr, ma10, rh, rl = md.get("atr"), md.get("ma10"), md.get("recent_high"), md.get("recent_low")
             
-            # 杠杆与流动性建议
+            # 杠杆与流动性建议（基于OI和成交量）
             oi = md.get("open_interest")
+            day_vol = md.get("day_volume")
             if oi is None: lev_advice = "OI数据缺失，建议 3x 以下轻仓。"
             elif oi > 500_000_000: lev_advice = "【极高流动性】建议杠杆：20x-50x（请严格计算保证金）。"
             elif oi > 50_000_000: lev_advice = "【高流动性】建议杠杆：10x-20x。"
@@ -244,7 +268,6 @@ def build_email_html(results, active_strategy_name, watchlist):
                 stop_str = fmt_price(stop)
                 
             position_pct = min(1.0, 0.02 / risk_pct) if risk_pct > 0 else 1.0
-            # 假设本金 10000 U，计算开仓指南
             capital = 10000
             max_loss = capital * 0.02
             position_value = max_loss / risk_pct if risk_pct > 0 else 0
@@ -321,7 +344,7 @@ def build_email_html(results, active_strategy_name, watchlist):
     if unsupported_list:
         html += "<hr><h3 style='color: #7f8c8d;'>⚠️ 暂不支持的标的</h3><ul>"
         for r in unsupported_list:
-            html += f"<li>{r['symbol']}：Hyperliquid 未上线该币种（合约）或 Gate.io 无数据（现货）</li>"
+            html += f"<li>{r['symbol']}：Hyperliquid 未上线该合约，且 Gate.io 也无对应现货数据</li>"
         html += "</ul>"
 
     html += "<hr><p style='text-align:center; color:#aaa; font-size:12px;'>本报告由牛来参谋长AI预警系统自动生成 | 数据仅供参考，不构成投资建议 | 合约交易风险极高，请严格设置止损</p>"
