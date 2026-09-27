@@ -2,11 +2,6 @@
 统一数据获取与指标计算模块
 - 合约：Hyperliquid（失败自动降级现货）
 - 现货：币安镜像优先 -> Gate.io -> Hyperliquid（最后兜底）
-
-核心设计：
-- market_data 中必须包含 data_mode 字段，明确标记当前是 "futures" 还是 "spot"
-- 合约降级到现货时，data_mode = "spot"，data_source 里标注 "（合约降级）"
-- 策略和报告层根据 data_mode 走不同的分析逻辑和展示文案
 """
 import time, requests
 import logging
@@ -18,12 +13,29 @@ GATEIO_SPOT_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 
 
-# ================= 币安镜像（现货） =================
-def _binance_symbol(symbol: str) -> str:
-    return symbol.replace("_", "").upper()
+# ================= 符号标准化工具 =================
+def _to_binance_spot(symbol: str) -> str:
+    """把 ARK / ARK_USDT 统一转成 ARKUSDT"""
+    s = symbol.upper().replace("_", "")
+    if not s.endswith("USDT"):
+        s += "USDT"
+    return s
 
+def _to_gate_spot(symbol: str) -> str:
+    """把 ARK / ARKUSDT 统一转成 ARK_USDT"""
+    s = symbol.upper().replace("USDT", "_USDT")
+    if not s.endswith("_USDT"):
+        s += "_USDT"
+    return s
+
+def _to_hyperliquid_coin(symbol: str) -> str:
+    """把 ARK_USDT / ARKUSDT 统一转成 ARK"""
+    return symbol.upper().replace("_USDT", "").replace("USDT", "").strip()
+
+
+# ================= 币安镜像（现货） =================
 def fetch_binance_spot_klines(symbol, interval="30m", limit=150, start_ms=None, end_ms=None):
-    binance_sym = _binance_symbol(symbol)
+    binance_sym = _to_binance_spot(symbol)
     url = f"{BINANCE_MIRROR}/api/v3/klines"
     all_klines = []
     if start_ms and end_ms:
@@ -35,7 +47,7 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=150, start_ms=None, 
                 r.raise_for_status()
                 data = r.json()
             except Exception as e:
-                log.warning(f"币安镜像请求失败: {e}")
+                log.warning(f"币安镜像请求失败: {e} | URL: {r.url}")
                 break
             if not data:
                 break
@@ -50,7 +62,7 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=150, start_ms=None, 
             data = r.json()
             all_klines = data if data else []
         except Exception as e:
-            log.warning(f"币安镜像请求失败: {e}")
+            log.warning(f"币安镜像请求失败: {e} | URL: {r.url}")
             return None
     if not all_klines:
         return None
@@ -75,8 +87,9 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=150, start_ms=None, 
 
 # ================= Gate.io（现货） =================
 def fetch_gateio_spot_klines(symbol, interval="30m", limit=150):
+    gate_sym = _to_gate_spot(symbol)
     try:
-        r = requests.get(GATEIO_SPOT_URL, params={"currency_pair": symbol, "interval": interval, "limit": limit}, timeout=15)
+        r = requests.get(GATEIO_SPOT_URL, params={"currency_pair": gate_sym, "interval": interval, "limit": limit}, timeout=15)
         r.raise_for_status()
         data = r.json()
         if not data: return None
@@ -91,16 +104,13 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=150):
         log.info(f"Gate.io现货K线成功: {symbol}, 共{len(klines)}根")
         return klines
     except Exception as e:
-        log.warning(f"Gate.io现货请求失败: {e}")
+        log.warning(f"Gate.io现货请求失败: {e} | URL: {r.url}")
         return None
 
 
 # ================= Hyperliquid（合约） =================
-def _hl_coin(symbol: str) -> str:
-    return symbol.replace("_USDT", "").replace("-USDT", "").replace("USDT", "").upper()
-
 def fetch_hyperliquid_klines(symbol, interval="30m", limit=150, start_ms=None, end_ms=None):
-    coin = _hl_coin(symbol)
+    coin = _to_hyperliquid_coin(symbol)
     now_ms = int(time.time() * 1000)
     if start_ms and end_ms:
         start_t, end_t = start_ms, end_ms
@@ -128,7 +138,7 @@ def fetch_hyperliquid_klines(symbol, interval="30m", limit=150, start_ms=None, e
         return None
 
 def fetch_hyperliquid_metrics(symbol, current_price):
-    coin = _hl_coin(symbol)
+    coin = _to_hyperliquid_coin(symbol)
     try:
         data = requests.post(HYPERLIQUID_INFO_URL, json={"type": "metaAndAssetCtxs"}, timeout=15).json()
         if not data: return None
@@ -199,11 +209,6 @@ def find_recent_low(klines, lookback=149):
 
 # ================= 构建 market_data（核心降级逻辑） =================
 def build_market_data(symbol, asset_type):
-    """
-    返回统一的 market_data 字典。关键字段：
-    - data_mode: "futures" 或 "spot"，明确标记当前分析模式
-    - data_source: 具体数据源描述，降级时带"（合约降级）"
-    """
     md = {
         "symbol": symbol, "asset_type": asset_type, "fetch_status": "ok",
         "data_mode": "futures",  # 默认合约模式
@@ -214,7 +219,6 @@ def build_market_data(symbol, asset_type):
         "recent_high": None, "recent_low": None, "data_source": "Unknown"
     }
 
-    # ============ 场景A：原生现货标的 ============
     if asset_type == "spot":
         klines = fetch_binance_spot_klines(symbol)
         source = "币安镜像 现货"
@@ -233,7 +237,7 @@ def build_market_data(symbol, asset_type):
         md["fetch_status"] = "unsupported"
         return md
 
-    # ============ 场景B：合约标的（尝试 Hyperliquid） ============
+    # 合约模式
     klines = fetch_hyperliquid_klines(symbol)
     if klines:
         current_price = klines[-1]["close"]
@@ -260,8 +264,8 @@ def build_market_data(symbol, asset_type):
                     md["funding_percentile"] = min(1.0, fr / 0.01)
         return md
 
-    # ============ 场景C：合约失败，降级到现货分析模式 ============
-    log.warning(f"[{symbol}] Hyperliquid 无该合约，自动降级到现货分析模式")
+    # 🚀 合约拿不到，降级到现货模式
+    log.warning(f"[{symbol}] 合约数据获取失败，触发降级：尝试拿现货数据")
     klines = fetch_binance_spot_klines(symbol)
     source = "币安镜像 现货（合约降级）"
     if not klines:
@@ -273,10 +277,9 @@ def build_market_data(symbol, asset_type):
             "ma10": calc_ma(klines, 10), "atr": calc_atr(klines, 14),
             "rsi": calc_rsi(klines, 14), "adx": calc_adx(klines, 14),
             "recent_high": find_recent_high(klines), "recent_low": find_recent_low(klines),
-            "data_source": source, "data_mode": "spot"  # 关键：标记为现货模式
+            "data_source": source, "data_mode": "spot"  # 标记为现货模式
         })
         return md
 
-    # ============ 场景D：合约和现货都拿不到 ============
     md["fetch_status"] = "unsupported"
     return md
