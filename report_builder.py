@@ -352,7 +352,7 @@ def build_report(results, active_strategies, watchlist):
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 觉得有用？点赞、转发、关注“牛来参谋长”，带你一起埋伏主力！</p>"
+    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 觉得有用？点赞、转发、关注“牛来参谋长”，合约交易心不慌！</p>"
     html += "</div></body></html>"
     return subject, html
 
@@ -379,7 +379,7 @@ def build_risk_warning():
 <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d1b1b 100%); color: #e0e0e0; padding: 25px; border-radius: 12px; margin-top: 25px; border: 1px solid #4a2c2c; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
     <h3 style="margin: 0 0 15px 0; color: #ffc107; font-size: 20px; text-align: center; letter-spacing: 2px;">⚠️ 参谋长最后说句掏心窝子的话</h3>
     <div style="border-left: 3px solid #d32f2f; padding-left: 15px; margin-bottom: 15px;">
-        <p style="font-size: 15px; line-height: 1.8; margin: 0; color: #fff;">兄弟们，这份报告是参谋长用命换来的盯盘心血，但我不能替你扣扳机。</p>
+        <p style="font-size: 15px; line-height: 1.8; margin: 0; color: #fff;">兄弟们，这份报告是参谋长用无数次失败换来的盯盘心血，但我不能替你扣扳机。</p>
     </div>
     <p style="font-size: 15px; line-height: 1.8; margin: 0 0 10px 0;">合约市场是个绞肉机。<b style="color: #ffc107;">90%的人死在这里，不是因为他们不够聪明，而是因为他们管不住手、舍不得止损、扛不住单。</b></p>
     <p style="font-size: 15px; line-height: 1.8; margin: 0 0 15px 0;"><b style="color: #ffc107;">参谋长给你的不是暴富密码，是一把刀。</b>刀怎么用，能不能活着走出来，看你自己。</p>
