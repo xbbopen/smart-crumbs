@@ -1,0 +1,47 @@
+name: 历史回测
+on:
+  workflow_dispatch:
+    inputs:
+      strategies:
+        description: '策略名列表（空格分隔）'
+        required: false
+      symbols:
+        description: '标的列表（空格分隔，如 BTC NEAR）'
+        required: false
+      interval:
+        description: 'K线周期（30m/1h/4h）'
+        required: false
+        default: '30m'
+      start_date:
+        description: '开始日期 YYYY-MM-DD'
+        required: false
+      end_date:
+        description: '结束日期 YYYY-MM-DD'
+        required: false
+      limit:
+        description: 'K线数量（指定日期区间则忽略）'
+        required: false
+        default: '1000'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python backtest.py
+        env:
+          BT_STRATEGIES: ${{ github.event.inputs.strategies }}
+          BT_SYMBOLS: ${{ github.event.inputs.symbols }}
+          BT_INTERVAL: ${{ github.event.inputs.interval }}
+          BT_START_DATE: ${{ github.event.inputs.start_date }}
+          BT_END_DATE: ${{ github.event.inputs.end_date }}
+          BT_LIMIT: ${{ github.event.inputs.limit }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
