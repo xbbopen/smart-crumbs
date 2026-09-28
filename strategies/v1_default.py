@@ -5,12 +5,11 @@ class V1DefaultStrategy(BaseStrategy):
     name = "参谋长强化版三轨策略"
 
     def evaluate(self, symbol, asset_type, market_data):
-        # 判断当前是合约模式还是现货模式
         is_spot_mode = market_data.get("data_mode") == "spot"
 
         result = {
             "track_1": {"score": 0, "details": {}, "hard_ok": False},
-            "track_2": {"score": 0, "details": {}, "hard_ok": False},
+            "track_2": {"score": 0, "details": {}, "hard_ok": False, "sub_type": None, "reason": ""},
             "track_3": {"score": 0, "details": {}, "hard_ok": False},
             "triggered": False, "direction": None, "reason": "",
             "data_mode": "spot" if is_spot_mode else "futures"
@@ -33,7 +32,7 @@ class V1DefaultStrategy(BaseStrategy):
 
         # 通用硬条件：ADX < 20 全部静默
         if adx is not None and adx < 20:
-            for t in ["track_1","track_2","track_3"]:
+            for t in ["track_1", "track_2", "track_3"]:
                 result[t]["details"]["市场状态"] = f"❌ ADX={adx:.2f} < 20（市场无序震荡，策略强制静默）"
             return result
 
@@ -43,12 +42,12 @@ class V1DefaultStrategy(BaseStrategy):
             ma20_4h = sum(k["close"] for k in klines_4h[-20:]) / 20
             trend_4h = "up" if price > ma20_4h else "down"
 
-        # 现货模式提示
         if is_spot_mode:
             result["track_1"]["details"]["数据模式"] = "🟢 现货分析模式（无资金费率、无OI）"
             result["track_2"]["details"]["数据模式"] = "🟢 现货分析模式（做空降级为逃顶预警）"
             result["track_3"]["details"]["数据模式"] = "🟢 现货分析模式（无资金费率、无OI）"
 
+        # 计算 CVD 序列
         cvd_series = []
         if klines:
             cvd = 0
@@ -91,54 +90,123 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_1"]["details"]["1.4-放量确认"] = "❌ 数据不足，无法判断"
 
-        # ================= 轨道2：见顶做空（现货模式下自动降级为逃顶预警） =================
+        # ================= 轨道2：做空（见顶做空 + 顺势做空） =================
         if trend_4h == "up":
             result["track_2"]["details"]["硬条件-4H趋势"] = "❌ 4H趋势向上，禁止做空"
-        elif not is_spot_mode and fp is not None and fp < 0.80:
-            result["track_2"]["details"]["硬条件-费率"] = f"❌ 费率百分位{fp:.0%} < 80%，多头拥挤度不够"
         else:
             result["track_2"]["hard_ok"] = True
             result["track_2"]["details"]["硬条件-4H趋势"] = "✅ 4H趋势向下或震荡，允许做空"
 
-            # 现货模式跳过资金费率硬条件
-            if is_spot_mode:
-                result["track_2"]["details"]["硬条件-费率"] = "🟢 现货模式，跳过费率判断"
-            else:
-                result["track_2"]["details"]["硬条件-费率"] = f"✅ 费率百分位{fp:.0%} ≥ 80%，多头拥挤"
+            # ========================================
+            # A. 见顶做空（反转）—— 满分4分，≥3分触发
+            # ========================================
+            result["track_2"]["details"]["──────── 📌 见顶做空（反转）────────"] = ""
+            reversal_score = 0
 
+            # A1 逼近高点
             if price >= rh * 0.97:
-                result["track_2"]["score"] += 1
-                result["track_2"]["details"]["2.1-逼近高点"] = f"✅ 已满足: {price} 接近 {rh}"
+                reversal_score += 1
+                result["track_2"]["details"]["A1-逼近高点"] = f"✅ 已满足: {price} 接近 {rh}"
             else:
-                result["track_2"]["details"]["2.1-逼近高点"] = f"❌ 未满足: 距离高点还有{((rh-price)/rh*100):.1f}%空间"
+                result["track_2"]["details"]["A1-逼近高点"] = f"❌ 未满足: 距离高点还有{((rh-price)/rh*100):.1f}%"
 
+            # A2 RSI超买
             if rsi >= 70:
-                result["track_2"]["score"] += 1
-                result["track_2"]["details"]["2.2-RSI超买"] = f"✅ 已满足: RSI={rsi:.1f} ≥ 70"
+                reversal_score += 1
+                result["track_2"]["details"]["A2-RSI超买"] = f"✅ 已满足: RSI={rsi:.1f} ≥ 70"
             else:
-                result["track_2"]["details"]["2.2-RSI超买"] = f"❌ 未满足: RSI={rsi:.1f} < 70"
+                result["track_2"]["details"]["A2-RSI超买"] = f"❌ 未满足: RSI={rsi:.1f} < 70"
 
+            # A3 CVD熊背离
             if cvd_series and len(cvd_series) >= 10:
                 high_now = max(k["high"] for k in klines[-3:])
                 high_prev = max(k["high"] for k in klines[-10:-3])
                 cvd_now = cvd_series[-1]
                 cvd_prev = max(cvd_series[-10:-3])
                 if high_now > high_prev and cvd_now < cvd_prev * 0.95:
-                    result["track_2"]["score"] += 1
-                    result["track_2"]["details"]["2.3-CVD熊背离"] = "✅ 已满足: 价新高CVD未新高"
+                    reversal_score += 1
+                    result["track_2"]["details"]["A3-CVD熊背离"] = "✅ 已满足: 价新高CVD未新高"
                 else:
-                    result["track_2"]["details"]["2.3-CVD熊背离"] = "❌ 未满足: 价格与CVD未出现顶背离"
+                    result["track_2"]["details"]["A3-CVD熊背离"] = "❌ 未满足: 价格与CVD未出现顶背离"
             else:
-                result["track_2"]["details"]["2.3-CVD熊背离"] = "❌ 数据不足，无法判断"
+                result["track_2"]["details"]["A3-CVD熊背离"] = "❌ 数据不足"
 
-            # 现货模式跳过费率极值条件
+            # A4 费率拥挤
             if is_spot_mode:
-                result["track_2"]["details"]["2.4-费率极值"] = "🟢 现货模式，此条件不适用"
-            elif fp is not None and fp >= 0.90:
-                result["track_2"]["score"] += 1
-                result["track_2"]["details"]["2.4-费率极值"] = f"✅ 已满足: 费率百分位{fp:.0%} ≥ 90%"
+                result["track_2"]["details"]["A4-费率极值"] = "🟢 现货模式，不适用"
+            elif fp is not None and fp >= 0.80:
+                reversal_score += 1
+                result["track_2"]["details"]["A4-费率极值"] = f"✅ 已满足: 拥挤度{fp:.0%} ≥ 80%"
             else:
-                result["track_2"]["details"]["2.4-费率极值"] = f"❌ 未满足: 费率百分位{fp if fp is not None else 0:.0%} < 90%"
+                result["track_2"]["details"]["A4-费率极值"] = f"❌ 未满足: 拥挤度{fp if fp is not None else 0:.0%} < 80%"
+
+            # ========================================
+            # B. 顺势做空（趋势延续）—— 满分4分，≥3分触发
+            # ========================================
+            result["track_2"]["details"]["──────── 📉 顺势做空（趋势）────────"] = ""
+            trend_follow_score = 0
+
+            # B1 已跌破MA10
+            if ma10 and price < ma10:
+                trend_follow_score += 1
+                result["track_2"]["details"]["B1-跌破MA10"] = f"✅ 已满足: {price} < MA10({ma10})"
+            else:
+                result["track_2"]["details"]["B1-跌破MA10"] = f"❌ 未满足: {price} 仍在 MA10({ma10}) 上方"
+
+            # B2 回撤区间（5%~15%）
+            drawdown = (rh - price) / rh if rh else 0
+            if 0.05 <= drawdown <= 0.15:
+                trend_follow_score += 1
+                result["track_2"]["details"]["B2-回撤区间"] = f"✅ 已满足: 距高点回撤{drawdown*100:.1f}%（5%-15%区间）"
+            elif drawdown < 0.05:
+                result["track_2"]["details"]["B2-回撤区间"] = f"❌ 未满足: 仅回撤{drawdown*100:.1f}%，距顶部太近（应看A类见顶信号）"
+            else:
+                result["track_2"]["details"]["B2-回撤区间"] = f"❌ 未满足: 已回撤{drawdown*100:.1f}%，进入暴跌反弹区（>15%）"
+
+            # B3 反弹遇阻（最近出现长上影或看跌吞没）
+            if klines and len(klines) >= 2:
+                last = klines[-1]
+                prev = klines[-2]
+                body_last = abs(last["close"] - last["open"])
+                upper_shadow_last = last["high"] - max(last["close"], last["open"])
+                is_bearish_engulf = (prev["close"] > prev["open"] and last["close"] < last["open"]
+                                     and last["open"] >= prev["close"] and last["close"] <= prev["open"])
+                if body_last > 0 and upper_shadow_last > body_last * 1.5:
+                    trend_follow_score += 1
+                    result["track_2"]["details"]["B3-反弹遇阻"] = "✅ 已满足: 出现长上影线（抛压明显）"
+                elif is_bearish_engulf:
+                    trend_follow_score += 1
+                    result["track_2"]["details"]["B3-反弹遇阻"] = "✅ 已满足: 出现看跌吞没"
+                else:
+                    result["track_2"]["details"]["B3-反弹遇阻"] = "❌ 未满足: 未出现明显遇阻形态"
+            else:
+                result["track_2"]["details"]["B3-反弹遇阻"] = "❌ 数据不足"
+
+            # B4 放量下跌
+            if klines and len(klines) >= 6:
+                avg_vol = sum(k["volume"] for k in klines[-6:-1]) / 5
+                if klines[-1]["close"] < klines[-1]["open"] and klines[-1]["volume"] > avg_vol * 1.3:
+                    trend_follow_score += 1
+                    result["track_2"]["details"]["B4-放量下跌"] = "✅ 已满足: 阴线放量（卖压真实）"
+                else:
+                    result["track_2"]["details"]["B4-放量下跌"] = "❌ 未满足: 未出现放量阴线"
+            else:
+                result["track_2"]["details"]["B4-放量下跌"] = "❌ 数据不足"
+
+            # ========================================
+            # 轨道2 最终判定：见顶做空优先，顺势做空兜底
+            # ========================================
+            result["track_2"]["details"]["📊 见顶做空得分"] = f"{reversal_score}/4"
+            result["track_2"]["details"]["📊 顺势做空得分"] = f"{trend_follow_score}/4"
+
+            if reversal_score >= 3:
+                result["track_2"]["sub_type"] = "reversal"
+                result["track_2"]["score"] = reversal_score
+                result["track_2"]["reason"] = f"【见顶做空】反转条件 {reversal_score}/4 触发"
+            elif trend_follow_score >= 3:
+                result["track_2"]["sub_type"] = "trend_follow"
+                result["track_2"]["score"] = trend_follow_score
+                result["track_2"]["reason"] = f"【顺势做空】趋势条件 {trend_follow_score}/4 触发（已错过完美见顶时机，下跌中继做空）"
 
         # ================= 轨道3：暴跌反弹做多 =================
         if trend_4h == "down":
@@ -172,20 +240,21 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_3"]["details"]["3.3-CVD牛背离"] = "❌ 数据不足，无法判断"
 
-        # ================= 触发判定 =================
-        # 现货模式下，轨道2的触发改为"spot_warning"（逃顶预警），而不是做空
-        if result["track_2"]["hard_ok"] and result["track_2"]["score"] >= 3:
+        # ================= 最终触发判定 =================
+        # 优先级：轨道2（做空）> 轨道3（反弹做多）> 轨道1（底部突破）
+        if result["track_2"]["hard_ok"] and result["track_2"].get("sub_type"):
             result["triggered"] = True
+            result["direction"] = "short"
+            result["reason"] = result["track_2"]["reason"]
             if is_spot_mode:
                 result["direction"] = "spot_warning"
-                result["reason"] = f"现货逃顶预警 {result['track_2']['score']}/4 触发（建议减仓，不做空）"
-            else:
-                result["direction"] = "short"
-                result["reason"] = f"见顶做空条件 {result['track_2']['score']}/4 触发"
+                result["reason"] = result["track_2"]["reason"].replace("做空", "逃顶预警")
+
         elif result["track_3"]["hard_ok"] and result["track_3"]["score"] >= 3:
             result["triggered"] = True
             result["direction"] = "long_rebound"
             result["reason"] = f"暴跌反弹条件 {result['track_3']['score']}/3 触发"
+
         elif result["track_1"]["hard_ok"] and result["track_1"]["score"] >= 3:
             result["triggered"] = True
             result["direction"] = "long_trend"
