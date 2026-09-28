@@ -4,6 +4,7 @@
 1. 符号解析层统一处理 BTC / BTCUSDT / BTC_USDT 等格式
 2. 请求保护层强制最小请求间隔 + 指数退避重试
 3. 状态明确返回：ok / rate_limited / not_found / error
+4. 降级链路：Hyperliquid -> 币安现货 -> Gate.io现货（无条件兜底）
 """
 import time, requests
 import logging
@@ -14,14 +15,10 @@ BINANCE_MIRROR = "https://data-api.binance.vision"
 GATEIO_SPOT_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-# 🚀 新增：周期毫秒映射表，修复4H K线时间窗口计算错误
+# 周期毫秒映射表
 INTERVAL_MS_MAP = {
-    "1m": 60 * 1000,
-    "5m": 5 * 60 * 1000,
-    "15m": 15 * 60 * 1000,
-    "30m": 30 * 60 * 1000,
-    "1h": 60 * 60 * 1000,
-    "4h": 4 * 60 * 60 * 1000,
+    "1m": 60 * 1000, "5m": 5 * 60 * 1000, "15m": 15 * 60 * 1000,
+    "30m": 30 * 60 * 1000, "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000,
     "1d": 24 * 60 * 60 * 1000,
 }
 
@@ -159,7 +156,6 @@ def fetch_hyperliquid_klines(symbol, interval="30m", limit=150, start_ms=None, e
     if start_ms and end_ms:
         start_t, end_t = start_ms, end_ms
     else:
-        # 🚀 核心修复：根据 interval 动态计算时间窗口
         interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
         start_t = now_ms - (limit * interval_ms)
         end_t = now_ms
@@ -242,7 +238,7 @@ def build_market_data(symbol, asset_type):
     if asset_type == "spot":
         klines, status = fetch_binance_spot_klines(symbol)
         source = "币安镜像 现货"
-        if not klines and status == "not_found":
+        if not klines:  # 🚀 无条件尝试下一个数据源
             klines, status = fetch_gateio_spot_klines(symbol)
             source = "Gate.io 现货"
         if klines:
@@ -261,11 +257,17 @@ def build_market_data(symbol, asset_type):
 
     if not klines:
         log.warning(f"[{symbol}] Hyperliquid 无合约数据，降级到现货")
+        
+        # 🚀 第一步：尝试币安
         klines, status = fetch_binance_spot_klines(symbol)
         source = "币安镜像 现货（合约降级）"
-        if not klines and status == "not_found":
+        
+        # 🚀 第二步：如果币安也失败（无论报什么错），无条件尝试 Gate.io
+        if not klines:
+            log.warning(f"[{symbol}] 币安无数据，继续降级尝试 Gate.io")
             klines, status = fetch_gateio_spot_klines(symbol)
             source = "Gate.io 现货（合约降级）"
+            
         if klines:
             md.update(_build_indicators(klines))
             md.update({"data_source": source, "data_mode": "spot"})
@@ -276,7 +278,6 @@ def build_market_data(symbol, asset_type):
     # 合约数据正常
     current_price = klines[-1]["close"]
     md.update(_build_indicators(klines))
-    # 🚀 这里同样依赖修复后的 fetch_hyperliquid_klines 来正确获取 4H K线
     klines_4h_result, _ = fetch_hyperliquid_klines(symbol, interval="4h", limit=50)
     md["klines_4h"] = klines_4h_result
     md.update({"current_price": current_price, "data_source": "Hyperliquid 合约", "data_mode": "futures"})
