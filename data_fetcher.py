@@ -276,7 +276,10 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     now_ms = int(time.time() * 1000)
 
     primary_source = get_primary_source(symbol, asset_type)
-    last_ts = get_last_timestamp(symbol, interval, source=primary_source)
+
+    # 🚀 核心修复：查DB里所有来源的最新时间戳，不再按主源过滤
+    # 因为 Q_USDT 的主源可能是 binance_spot，但实际数据来自 gate_spot
+    last_ts = get_last_timestamp(symbol, interval, source=None)
 
     actual_source = primary_source
     klines_new = []
@@ -286,31 +289,33 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
         if fetch_start >= now_ms:
             log.info(f"[{symbol}][{interval}] 数据已最新")
         else:
+            # 增量拉取（走瀑布式降级）
             if primary_source == "hyperliquid":
                 klines_new, _ = fetch_hyperliquid_klines(symbol, interval, 5000, fetch_start, now_ms)
                 if klines_new: actual_source = "hyperliquid"
             if not klines_new:
                 klines_new, _ = fetch_binance_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-                actual_source = "binance_spot"
+                if klines_new: actual_source = "binance_spot"
             if not klines_new:
                 klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-                actual_source = "gate_spot"
+                if klines_new: actual_source = "gate_spot"
     else:
+        # 首次运行：从最近N根探测
         log.warning(f"[{symbol}][{interval}] DB无数据，从最近N根探测")
         if primary_source == "hyperliquid":
             klines_new = fetch_klines_from_now(fetch_hyperliquid_klines, symbol, interval, desired_bars)
             if klines_new: actual_source = "hyperliquid"
         if not klines_new:
             klines_new = fetch_klines_from_now(fetch_binance_spot_klines, symbol, interval, desired_bars)
-            actual_source = "binance_spot"
+            if klines_new: actual_source = "binance_spot"
         if not klines_new:
             klines_new = fetch_klines_from_now(fetch_gateio_spot_klines, symbol, interval, desired_bars)
-            actual_source = "gate_spot"
+            if klines_new: actual_source = "gate_spot"
 
     if klines_new:
         upsert_klines(symbol, interval, klines_new, source=actual_source)
 
-    # 读取时不再过滤 source
+    # 读取时也不按主源过滤，直接读全部数据
     klines_all = load_klines(symbol, interval, desired_bars, source=None)
     if len(klines_all) >= 50:
         return klines_all, {
@@ -319,7 +324,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
             "primary_count": len(klines_all),
         }
 
-    # 兜底
     fallback = klines_new or []
     return fallback, {
         "primary": primary_source, "actual": actual_source,
