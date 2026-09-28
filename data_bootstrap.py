@@ -1,9 +1,6 @@
 """
 首次历史数据拉取脚本。
-用法：
-    python data_bootstrap.py --from-config
-    python data_bootstrap.py --symbols BTC ETH SOL --intervals 30m 4h --days 365
-支持断点续传 + 30天分页窗口（兼容 Hyperliquid 的单次请求限制）。
+核心：使用 fetch_klines_from_now 从最新往前分段拉取，瀑布式降级。
 """
 import argparse
 import json
@@ -17,6 +14,7 @@ sys.path.insert(0, ".")
 from data_db import get_last_timestamp, upsert_klines, count_klines, db_size_mb, source_stats
 from data_fetcher import (
     fetch_hyperliquid_klines, fetch_binance_spot_klines, fetch_gateio_spot_klines,
+    fetch_klines_from_now,
     to_hyperliquid_coin, get_hyperliquid_universe,
 )
 
@@ -26,54 +24,14 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger(__name__)
 
 BJT = timezone(timedelta(hours=8))
-INTERVAL_MS = {"30m": 30 * 60 * 1000, "4h": 4 * 60 * 60 * 1000}
 
-# 🚀 固定分页窗口：30天（兼容 Hyperliquid 单次请求限制）
-PAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
-
-
-def fetch_klines_paged(fetch_func, symbol, interval, start_ms, end_ms, page_interval_ms):
-    """
-    分页拉取。每次请求固定 30 天窗口，避免超时/超限。
-    page_interval_ms 用于推进 cur 到下一根K线的时间戳。
-    """
-    all_klines = []
-    cur = start_ms
-    max_iter = 20  # 一年最多13页，20足够
-    iter_count = 0
-
-    while cur < end_ms and iter_count < max_iter:
-        iter_count += 1
-        chunk_end = min(cur + PAGE_WINDOW_MS, end_ms)
-
-        klines, status = fetch_func(symbol, interval, 5000, cur, chunk_end)
-
-        if not klines:
-            # 🚀 如果是 not_found，尝试缩短窗口到 7 天再试一次
-            if status == "not_found" and (chunk_end - cur) > 7 * 24 * 60 * 60 * 1000:
-                log.info(f"    [{symbol}][{interval}] 30天窗口失败，尝试7天窗口")
-                chunk_end = min(cur + 7 * 24 * 60 * 60 * 1000, end_ms)
-                klines, status = fetch_func(symbol, interval, 5000, cur, chunk_end)
-
-            if not klines:
-                log.warning(f"    [{symbol}][{interval}] 分页失败: {status}（已拉{len(all_klines)}根）")
-                break
-
-        all_klines.extend(klines)
-        last_ts = klines[-1]["timestamp"]
-
-        # 防止死循环
-        if last_ts <= cur:
-            break
-
-        # 推进到下一根K线
-        cur = last_ts + page_interval_ms
-
-    return all_klines
+TARGET_BARS = {
+    "30m": 500,
+    "4h": 2000,
+}
 
 
 def resolve_source(symbol, asset_type):
-    """决定该标的的主源"""
     if asset_type == "futures":
         coin = to_hyperliquid_coin(symbol)
         if coin in get_hyperliquid_universe():
@@ -81,45 +39,59 @@ def resolve_source(symbol, asset_type):
     return "binance_spot", fetch_binance_spot_klines
 
 
-def bootstrap_one(symbol, asset_type, intervals, days_back):
+def fetch_with_cascade(symbol, interval, primary_source, primary_fetch, target):
+    """
+    瀑布式降级拉取：
+    1. 主源
+    2. 主源失败 → 币安现货
+    3. 币安失败 → Gate现货
+    返回 (klines, actual_source)
+    """
+    # 第一层：主源
+    if primary_source == "hyperliquid":
+        log.info(f"  [{interval}] 尝试主源 Hyperliquid")
+        klines = fetch_klines_from_now(primary_fetch, symbol, interval, target)
+        if klines:
+            return klines, "hyperliquid"
+        log.warning(f"  [{interval}] Hyperliquid 失败，降级币安现货")
+
+    # 第二层：币安现货
+    log.info(f"  [{interval}] 尝试币安现货")
+    klines = fetch_klines_from_now(fetch_binance_spot_klines, symbol, interval, target)
+    if klines:
+        return klines, "binance_spot"
+
+    # 第三层：Gate现货
+    log.warning(f"  [{interval}] 币安失败，降级Gate现货")
+    klines = fetch_klines_from_now(fetch_gateio_spot_klines, symbol, interval, target)
+    if klines:
+        return klines, "gate_spot"
+
+    # 全部失败
+    log.error(f"  [{interval}] 所有源都失败")
+    return None, None
+
+
+def bootstrap_one(symbol, asset_type, intervals):
     log.info(f"\n{'='*60}")
     log.info(f"处理 {symbol} ({asset_type})")
     log.info(f"{'='*60}")
-
-    now_ms = int(time.time() * 1000)
-    start_ms = now_ms - (days_back * 24 * 60 * 60 * 1000)
 
     primary_source, primary_fetch = resolve_source(symbol, asset_type)
     log.info(f"  主数据源: {primary_source}")
 
     for interval in intervals:
-        page_ms = INTERVAL_MS.get(interval, 30 * 60 * 1000)
-        last_ts = get_last_timestamp(symbol, interval, source=primary_source)
+        target = TARGET_BARS.get(interval, 500)
 
+        # 检查是否已有数据（只要有数据就跳过，不管来自哪个源）
+        last_ts = get_last_timestamp(symbol, interval, source=None)
         if last_ts:
-            fetch_start = last_ts + page_ms
-            log.info(f"  [{interval}] 主源已有数据，从该点续传")
-        else:
-            fetch_start = start_ms
-            start_dt = datetime.fromtimestamp(start_ms / 1000, BJT)
-            log.info(f"  [{interval}] 从 {start_dt} 开始全量拉取")
-
-        if fetch_start >= now_ms:
-            log.info(f"  [{interval}] 数据已是最新，跳过")
+            total = count_klines(symbol, interval)
+            log.info(f"  [{interval}] 已有数据（{total}根），跳过")
             continue
 
-        klines = fetch_klines_paged(primary_fetch, symbol, interval, fetch_start, now_ms, page_ms)
-        actual_source = primary_source
-
-        # 主源失败降级
-        if not klines and primary_source == "hyperliquid":
-            log.warning(f"  [{interval}] Hyperliquid 失败，降级币安现货")
-            klines = fetch_klines_paged(fetch_binance_spot_klines, symbol, interval, fetch_start, now_ms, page_ms)
-            actual_source = "binance_spot"
-            if not klines:
-                log.warning(f"  [{interval}] 币安失败，降级Gate现货")
-                klines = fetch_klines_paged(fetch_gateio_spot_klines, symbol, interval, fetch_start, now_ms, page_ms)
-                actual_source = "gate_spot"
+        # 瀑布式拉取
+        klines, actual_source = fetch_with_cascade(symbol, interval, primary_source, primary_fetch, target)
 
         if klines:
             inserted = upsert_klines(symbol, interval, klines, source=actual_source)
@@ -127,7 +99,7 @@ def bootstrap_one(symbol, asset_type, intervals, days_back):
             stats = source_stats(symbol, interval)
             log.info(f"  [{interval}] ✅ 写入 {inserted} 根（source={actual_source}），累计 {total} 根，分布: {stats}")
         else:
-            log.warning(f"  [{interval}] ❌ 未拉取到数据")
+            log.warning(f"  [{interval}] ❌ 所有源都失败，跳过")
 
 
 def main():
@@ -135,7 +107,6 @@ def main():
     parser.add_argument("--symbols", nargs="*")
     parser.add_argument("--from-config", action="store_true")
     parser.add_argument("--intervals", nargs="*", default=["30m", "4h"])
-    parser.add_argument("--days", type=int, default=365)
     args = parser.parse_args()
 
     if args.from_config:
@@ -148,7 +119,8 @@ def main():
         log.error("必须指定 --symbols 或 --from-config")
         return
 
-    log.info(f"📊 Bootstrap 开始：{len(watchlist)} 个标的，周期 {args.intervals}，回溯 {args.days} 天")
+    log.info(f"📊 Bootstrap 开始：{len(watchlist)} 个标的")
+    log.info(f"   目标根数: 30m=500，4h=2000")
     log.info(f"   当前数据库大小：{db_size_mb():.2f} MB")
 
     start_time = time.time()
@@ -157,7 +129,7 @@ def main():
         typ = item.get("type", "futures")
         log.info(f"\n[{idx}/{len(watchlist)}]")
         try:
-            bootstrap_one(sym, typ, args.intervals, args.days)
+            bootstrap_one(sym, typ, args.intervals)
         except Exception as e:
             log.error(f"  ❌ {sym} 处理异常: {e}")
             continue
