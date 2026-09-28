@@ -23,12 +23,12 @@ CONDITION_EXPLANATIONS = {
     "A4.1H RSI超买或顶背离": "1H是否极度狂热或出现顶背离",
     "A5.1H KDJ超买": "1H短期是否过热",
     "A6.4H MACD死叉": "4H动量是否转空",
-    "B1.4H空头排列": "4H EMA20 < EMA50，趋势向下",
-    "B2.跌破30m MA10": "短期生命线已失守",
-    "B3.回撤区间": "价格处于下跌中继的舒适追空区（5%-15%）",
+    "B1.4H空头结构": "4H EMA20 < EMA50，中期空头结构",
+    "B2.价格接近/高于布林中轨": "等反弹到1H布林中轨附近，是顺势做空的最佳位置",
+    "B3.1H RSI中位": "1H RSI在40-60，说明跌势未完成",
     "B4.30m反弹遇阻": "反弹时出现长上影或看跌吞没",
-    "B5.1H MACD柱为负": "1H动量偏空",
-    "B6.1H RSI偏弱": "1H RSI < 50，偏空",
+    "B5.1H MACD空头": "1H动量偏空",
+    "B6.30m RSI未超买": "30m RSI<60，没有极度狂热",
     "1.大幅回撤": "是否跌出黄金坑",
     "2.30m RSI超卖": "30m是否极度恐慌",
     "3.30m CVD牛背离": "价跌但主力暗中吸筹",
@@ -213,7 +213,7 @@ def generate_commander_comment(r, is_triggered):
         if direction == "short":
             sub_type = best_sr.get("track_2", {}).get("sub_type", "reversal")
             if sub_type == "trend_follow":
-                comment = f"兄弟们，{r['symbol']} 双周期空头共振（1D={trend_1d}，4H={trend_4h}）。价格跌破生命线，正在下跌中继。这种反弹就是给空头送钱的机会，顺势追空，带好2%止损！"
+                comment = f"兄弟们，{r['symbol']} 4H空头结构 + 价格反弹到关键阻力。这种反弹就是给空头送钱的机会，顺势追空，带好2%止损！"
             else:
                 comment = f"兄弟们，{r['symbol']} 主力磨刀霍霍了！RSI飙到{rsi_str}，费率{fr_str}，多头拥挤度{fp_str}。1D和4H共振向下，这是主力准备'一锅端'的信号！"
         elif direction == "spot_warning":
@@ -256,12 +256,13 @@ def render_track_details(details, max_score):
             html += "</li>"
     return html
 
-# ================= 🚀 全新：分档入场计划渲染 =================
+# ================= 🚀 入场计划渲染（现货/合约区分） =================
 def render_entry_plan(entry_plan, direction, cp, cp_str, md):
-    """渲染分档入场计划"""
+    """合约模式：显示保证金和杠杆。现货模式：显示买入金额和币数量。"""
     if not entry_plan:
         return ""
 
+    is_spot_mode = md.get("data_mode") == "spot"
     stages = entry_plan.get("stages", [])
     avg_price = entry_plan.get("avg_price", cp)
     stop = entry_plan.get("stop")
@@ -271,10 +272,10 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     if direction == "spot_warning": direction_label = "逃顶减仓"
 
     html = "<div style='background:#fffbea; padding: 15px; border-left: 5px solid #f39c12; margin-top: 15px; border-radius: 0 8px 8px 0;'>"
-    html += "<h4 style='margin-top:0; color:#e67e22; font-size: 18px;'>🎯 参谋长分档入场计划</h4>"
+    html += f"<h4 style='margin-top:0; color:#e67e22; font-size: 18px;'>🎯 参谋长分档{'买入' if is_spot_mode else '入场'}计划</h4>"
     html += f"<p style='font-size:14px; color:#666;'>{note}</p>"
     html += "<table style='width:100%; font-size:13px; border-collapse:collapse; margin-top:8px;'>"
-    html += "<tr style='background:#f0f0f0;'><th style='padding:6px;'>档位</th><th style='padding:6px;'>仓位</th><th style='padding:6px;'>类型</th><th style='padding:6px;'>入场价</th><th style='padding:6px;'>说明</th></tr>"
+    html += "<tr style='background:#f0f0f0;'><th style='padding:6px;'>档位</th><th style='padding:6px;'>仓位</th><th style='padding:6px;'>类型</th><th style='padding:6px;'>价格</th><th style='padding:6px;'>说明</th></tr>"
     for i, s in enumerate(stages, 1):
         type_label = "市价" if s["type"] == "market" else "限价挂单"
         type_color = "#e74c3c" if s["type"] == "market" else "#3498db"
@@ -286,16 +287,30 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
         html += f"<td style='padding:6px; font-size:12px; color:#666;'>{s['note']}</td></tr>"
     html += "</table>"
 
-    html += f"<p style='margin-top:12px;'><b>加权平均入场价：</b><span style='color:#e67e22; font-weight:bold;'>${avg_price:.4f}</span></p>"
+    html += f"<p style='margin-top:12px;'><b>加权平均{'买入' if is_spot_mode else '入场'}价：</b><span style='color:#e67e22; font-weight:bold;'>${avg_price:.4f}</span></p>"
     if stop:
         risk_pct = abs(avg_price - stop) / avg_price
-        position_pct = min(0.5, 0.02 / risk_pct) if risk_pct > 0 else 0.5
-        position_value = 10000 * position_pct
-        margin_10x = position_value / 10
-        coin_amount = position_value / avg_price if avg_price else 0
-        html += f"<p><b>硬止损价：</b><span style='color:#d32f2f; font-weight:bold;'>${stop:.4f}</span></p>"
-        html += f"<p><b>止损空间（以加权均价计）：</b>{risk_pct*100:.2f}%</p>"
-        html += f"<p><b>2%资金管理（本金10000U）：</b>最大总仓位 <b>{position_value:.2f} USDT</b>。<br>10倍杠杆下，投入保证金 <b>{margin_10x:.2f} USDT</b>，总开仓数量 <b>{coin_amount:.4f} 个</b>（按各档位权重分配）。</p>"
+        if is_spot_mode:
+            # 现货：2%规则，本金10000 USDT，单笔最大亏损200 USDT
+            max_loss = 200
+            position_value = min(10000, max_loss / risk_pct) if risk_pct > 0 else 10000
+            coin_amount = position_value / avg_price if avg_price else 0
+            html += f"<p><b>止损触发价：</b><span style='color:#d32f2f; font-weight:bold;'>${stop:.4f}</span></p>"
+            html += f"<p><b>止损空间：</b>{risk_pct*100:.2f}%</p>"
+            html += f"<p><b>🛡️ 现货2%规则（本金10000U）：</b>建议买入 <b>{position_value:.2f} USDT</b>，"
+            html += f"对应 <b>{coin_amount:.4f} 个 {md.get('symbol','').replace('_USDT','')}</b>。<br>"
+            html += f"<span style='color:#e67e22;'>若止损触发，最大亏损约 {max_loss} U（占本金 2%）。</span></p>"
+        else:
+            # 合约：2%规则，10倍杠杆
+            position_pct = min(0.5, 0.02 / risk_pct) if risk_pct > 0 else 0.5
+            position_value = 10000 * position_pct
+            margin_10x = position_value / 10
+            coin_amount = position_value / avg_price if avg_price else 0
+            html += f"<p><b>硬止损价：</b><span style='color:#d32f2f; font-weight:bold;'>${stop:.4f}</span></p>"
+            html += f"<p><b>止损空间：</b>{risk_pct*100:.2f}%</p>"
+            html += f"<p><b>🛡️ 2%资金管理（本金10000U）：</b>最大总仓位 <b>{position_value:.2f} USDT</b>。<br>"
+            html += f"10倍杠杆下，投入保证金 <b>{margin_10x:.2f} USDT</b>，"
+            html += f"总开仓数量 <b>{coin_amount:.4f} 个</b>（按各档位权重分配）。</p>"
 
     # 移动止盈
     if avg_price and stop:
@@ -424,13 +439,16 @@ def build_symbol_block(r):
         html += render_track_details(ta.get("details", {}), max_score)
         html += "</ul>"
 
-        # 🚀 分档入场计划
+        # 🚀 入场计划：区分现货/合约
         entry_plan = active_sr.get("entry_plan")
-        if entry_plan and not is_spot_mode:
-            html += render_entry_plan(entry_plan, triggered_direction, cp, cp_str, md)
-        elif is_spot_mode:
+        if triggered_direction == "spot_warning":
+            # 现货逃顶预警：显示减仓建议
             html += "<div style='background:#fff3cd; padding:15px; border-left:5px solid #e67e22; border-radius:0 8px 8px 0; margin-top:15px;'>"
-            html += "<p style='margin:0; color:#e67e22; font-weight:bold;'>⚠️ 现货模式不可做空，建议现有多单分批止盈减仓，不建议新建任何方向仓位。</p></div>"
+            html += "<p style='margin:0; color:#e67e22; font-weight:bold;'>⚠️ 现货模式无法做空。这是逃顶预警信号，建议现有多单分批止盈减仓，不要再追多。</p>"
+            html += "</div>"
+        elif entry_plan:
+            # 现货或合约，正常显示入场计划（render_entry_plan 内部会区分）
+            html += render_entry_plan(entry_plan, triggered_direction, cp, cp_str, md)
 
         html += generate_commander_comment(r, is_triggered=True)
         html += "</div>"
