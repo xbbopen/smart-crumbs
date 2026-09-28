@@ -14,7 +14,6 @@ class V1DefaultStrategy(BaseStrategy):
             "track_4": {"score": 0, "max": 6, "details": {}, "hard_ok": False, "name": "趋势回踩做多"},
             "triggered": False, "direction": None, "reason": "",
             "data_mode": "spot" if is_spot_mode else "futures",
-            # 多周期状态
             "multi_tf": {
                 "trend_1d": market_data.get("trend_1d"),
                 "trend_4h": market_data.get("trend_4h"),
@@ -56,6 +55,13 @@ class V1DefaultStrategy(BaseStrategy):
             result["track_1"]["details"]["数据不足"] = "❌ 核心指标缺失"
             return result
 
+        # 🚀 预先计算所有可能为None的指标字符串，避免 f-string 报错
+        rsi_str = f"{rsi:.1f}"
+        rsi_1h_str = f"{rsi_1h:.1f}" if rsi_1h is not None else "N/A"
+        rsi_4h_str = f"{rsi_4h:.1f}" if rsi_4h is not None else "N/A"
+        rsi_1d_str = f"{rsi_1d:.1f}" if rsi_1d is not None else "N/A"
+        kdj_j_str = f"{kdj_1h['j']:.1f}" if kdj_1h.get("j") is not None else "N/A"
+
         # ADX 分层门槛
         adx_ok_trend = adx is not None and adx >= 20
         adx_ok_reversal = adx is not None and adx >= 12
@@ -70,7 +76,6 @@ class V1DefaultStrategy(BaseStrategy):
 
         # ============================================================
         # 轨道1：底部突破做多
-        # 硬条件：日线非空头 + 4H非空头
         # ============================================================
         if trend_1d == "down" or trend_4h == "down":
             result["track_1"]["details"]["硬条件"] = f"❌ 大趋势逆风（1D={trend_1d or '?'}, 4H={trend_4h or '?'}）"
@@ -88,15 +93,16 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["2.站上30m MA10"] = f"✅ {price} > {ma10:.4f}"
             else:
-                result["track_1"]["details"]["2.站上30m MA10"] = f"❌ {price} < {ma10}"
+                ma10_str = f"{ma10:.4f}" if ma10 else "N/A"
+                result["track_1"]["details"]["2.站上30m MA10"] = f"❌ {price} < {ma10_str}"
 
-            if 45 <= rsi <= 65 or (rsi_1h and rsi_1h < 40):
+            if 45 <= rsi <= 65 or (rsi_1h is not None and rsi_1h < 40):
                 result["track_1"]["score"] += 1
-                result["track_1"]["details"]["3.30m RSI温和 或 1H超卖"] = f"✅ 30m RSI={rsi:.1f}, 1h RSI={rsi_1h:.1f if rsi_1h else 'N/A'}"
+                result["track_1"]["details"]["3.30m RSI温和 或 1H超卖"] = f"✅ 30m RSI={rsi_str}, 1h RSI={rsi_1h_str}"
             else:
-                result["track_1"]["details"]["3.30m RSI温和 或 1H超卖"] = f"❌ 30m RSI={rsi:.1f}"
+                result["track_1"]["details"]["3.30m RSI温和 或 1H超卖"] = f"❌ 30m RSI={rsi_str}"
 
-            if klines and len(klines) >= 10:
+            if klines and len(klines) >= 6:
                 avg_vol = sum(k["volume"] for k in klines[-6:-1]) / 5
                 if klines[-1]["volume"] > avg_vol * 1.3 and klines[-1]["close"] > klines[-1]["open"]:
                     result["track_1"]["score"] += 1
@@ -108,9 +114,9 @@ class V1DefaultStrategy(BaseStrategy):
 
             if kdj_1h.get("j") is not None and kdj_1h["j"] < 20:
                 result["track_1"]["score"] += 1
-                result["track_1"]["details"]["5.1H KDJ超卖"] = f"✅ KDJ J={kdj_1h['j']:.1f} < 20"
+                result["track_1"]["details"]["5.1H KDJ超卖"] = f"✅ KDJ J={kdj_j_str} < 20"
             else:
-                result["track_1"]["details"]["5.1H KDJ超卖"] = f"❌ J={kdj_1h.get('j', 'N/A')}"
+                result["track_1"]["details"]["5.1H KDJ超卖"] = f"❌ J={kdj_j_str}"
 
             if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None and macd_4h["dif"] > macd_4h["dea"]:
                 result["track_1"]["score"] += 1
@@ -120,19 +126,18 @@ class V1DefaultStrategy(BaseStrategy):
 
         # ============================================================
         # 轨道2A：见顶做空（反转）
-        # 硬条件：日线非多头 + 4H非多头 + ADX ≥ 20
         # ============================================================
         if trend_1d == "up" or trend_4h == "up":
             result["track_2"]["details"]["硬条件"] = f"❌ 大趋势逆风（1D={trend_1d or '?'}, 4H={trend_4h or '?'}）"
         elif not adx_ok_trend:
-            result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx:.1f} < 20，市场无序震荡"
+            adx_str = f"{adx:.1f}" if adx is not None else "N/A"
+            result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str} < 20，市场无序震荡"
         else:
             result["track_2"]["hard_ok"] = True
             result["track_2"]["details"]["硬条件"] = f"✅ 1D={trend_1d or '?'} + 4H={trend_4h or '?'} + ADX≥20"
 
             result["track_2"]["details"]["──────── 📌 见顶做空（反转）────────"] = ""
             reversal_score = 0
-            # 满分6分：逼近高点/30m RSI超买/30m CVD顶背离/1H RSI超买或顶背离/1H KDJ超买/4H MACD死叉
 
             if price >= rh * 0.97:
                 reversal_score += 1
@@ -142,9 +147,9 @@ class V1DefaultStrategy(BaseStrategy):
 
             if rsi >= 70:
                 reversal_score += 1
-                result["track_2"]["details"]["A2.30m RSI超买"] = f"✅ RSI={rsi:.1f}"
+                result["track_2"]["details"]["A2.30m RSI超买"] = f"✅ RSI={rsi_str}"
             else:
-                result["track_2"]["details"]["A2.30m RSI超买"] = f"❌ RSI={rsi:.1f}"
+                result["track_2"]["details"]["A2.30m RSI超买"] = f"❌ RSI={rsi_str}"
 
             if cvd_series and len(cvd_series) >= 10:
                 high_now = max(k["high"] for k in klines[-3:])
@@ -159,17 +164,18 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_2"]["details"]["A3.30m CVD顶背离"] = "❌ 数据不足"
 
-            if (rsi_1h and rsi_1h >= 70) or rsi_div == "bearish":
+            if (rsi_1h is not None and rsi_1h >= 70) or rsi_div == "bearish":
                 reversal_score += 1
-                result["track_2"]["details"]["A4.1H RSI超买或顶背离"] = f"✅ 1h RSI={rsi_1h if rsi_1h else 'N/A'}, 背离={rsi_div or '无'}"
+                rsi_div_str = rsi_div if rsi_div else "无"
+                result["track_2"]["details"]["A4.1H RSI超买或顶背离"] = f"✅ 1h RSI={rsi_1h_str}, 背离={rsi_div_str}"
             else:
-                result["track_2"]["details"]["A4.1H RSI超买或顶背离"] = f"❌ 1h RSI={rsi_1h if rsi_1h else 'N/A'}"
+                result["track_2"]["details"]["A4.1H RSI超买或顶背离"] = f"❌ 1h RSI={rsi_1h_str}"
 
             if kdj_1h.get("j") is not None and kdj_1h["j"] > 100:
                 reversal_score += 1
-                result["track_2"]["details"]["A5.1H KDJ超买"] = f"✅ J={kdj_1h['j']:.1f} > 100"
+                result["track_2"]["details"]["A5.1H KDJ超买"] = f"✅ J={kdj_j_str} > 100"
             else:
-                result["track_2"]["details"]["A5.1H KDJ超买"] = f"❌ J={kdj_1h.get('j', 'N/A')}"
+                result["track_2"]["details"]["A5.1H KDJ超买"] = f"❌ J={kdj_j_str}"
 
             if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None and macd_4h["dif"] < macd_4h["dea"]:
                 reversal_score += 1
@@ -178,10 +184,9 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_2"]["details"]["A6.4H MACD死叉"] = "❌ 4H MACD未死叉"
 
             result["track_2"]["details"]["📊 见顶做空得分"] = f"{reversal_score}/6"
-            result["track_2"]["_reversal_score"] = reversal_score
 
             # ============================================================
-            # 轨道2B：顺势做空（趋势延续）
+            # 轨道2B：顺势做空
             # ============================================================
             result["track_2"]["details"]["──────── 📉 顺势做空（趋势延续）────────"] = ""
             tf_score = 0
@@ -196,7 +201,8 @@ class V1DefaultStrategy(BaseStrategy):
                 tf_score += 1
                 result["track_2"]["details"]["B2.跌破30m MA10"] = f"✅ {price} < {ma10:.4f}"
             else:
-                result["track_2"]["details"]["B2.跌破30m MA10"] = f"❌ {price} 仍在MA10上方"
+                ma10_str = f"{ma10:.4f}" if ma10 else "N/A"
+                result["track_2"]["details"]["B2.跌破30m MA10"] = f"❌ {price} 仍在MA10({ma10_str})上方"
 
             drawdown = (rh - price) / rh if rh else 0
             if 0.05 <= drawdown <= 0.15:
@@ -224,18 +230,18 @@ class V1DefaultStrategy(BaseStrategy):
 
             if macd_1h.get("hist") is not None and macd_1h["hist"] < 0:
                 tf_score += 1
-                result["track_2"]["details"]["B5.1H MACD柱为负"] = f"✅ 柱值={macd_1h['hist']:.4f}"
+                macd_hist_str = f"{macd_1h['hist']:.4f}"
+                result["track_2"]["details"]["B5.1H MACD柱为负"] = f"✅ 柱值={macd_hist_str}"
             else:
                 result["track_2"]["details"]["B5.1H MACD柱为负"] = "❌ 1H MACD柱为正"
 
             if rsi_1h is not None and rsi_1h < 50:
                 tf_score += 1
-                result["track_2"]["details"]["B6.1H RSI偏弱"] = f"✅ RSI={rsi_1h:.1f} < 50"
+                result["track_2"]["details"]["B6.1H RSI偏弱"] = f"✅ RSI={rsi_1h_str} < 50"
             else:
-                result["track_2"]["details"]["B6.1H RSI偏弱"] = f"❌ RSI={rsi_1h if rsi_1h else 'N/A'}"
+                result["track_2"]["details"]["B6.1H RSI偏弱"] = f"❌ RSI={rsi_1h_str}"
 
             result["track_2"]["details"]["📊 顺势做空得分"] = f"{tf_score}/6"
-            result["track_2"]["_tf_score"] = tf_score
 
             # 最终判定：见顶优先，顺势兜底
             if reversal_score >= 4:
@@ -249,12 +255,12 @@ class V1DefaultStrategy(BaseStrategy):
 
         # ============================================================
         # 轨道3：暴跌反弹做多
-        # 硬条件：日线非空头 + ADX ≥ 12（放宽，允许反弹行情）
         # ============================================================
         if trend_1d == "down":
-            result["track_3"]["details"]["硬条件"] = f"❌ 1D趋势向下，禁止抄底"
+            result["track_3"]["details"]["硬条件"] = "❌ 1D趋势向下，禁止抄底"
         elif not adx_ok_reversal:
-            result["track_3"]["details"]["硬条件"] = f"❌ ADX={adx:.1f} < 12"
+            adx_str = f"{adx:.1f}" if adx is not None else "N/A"
+            result["track_3"]["details"]["硬条件"] = f"❌ ADX={adx_str} < 12"
         else:
             result["track_3"]["hard_ok"] = True
             result["track_3"]["details"]["硬条件"] = f"✅ 1D={trend_1d or '?'} + ADX≥12"
@@ -267,9 +273,9 @@ class V1DefaultStrategy(BaseStrategy):
 
             if rsi <= 35:
                 result["track_3"]["score"] += 1
-                result["track_3"]["details"]["2.30m RSI超卖"] = f"✅ RSI={rsi:.1f}"
+                result["track_3"]["details"]["2.30m RSI超卖"] = f"✅ RSI={rsi_str}"
             else:
-                result["track_3"]["details"]["2.30m RSI超卖"] = f"❌ RSI={rsi:.1f}"
+                result["track_3"]["details"]["2.30m RSI超卖"] = f"❌ RSI={rsi_str}"
 
             if cvd_series and len(cvd_series) >= 10:
                 low_now = min(k["low"] for k in klines[-3:])
@@ -286,17 +292,17 @@ class V1DefaultStrategy(BaseStrategy):
 
             if (rsi_1h is not None and rsi_1h < 30) or rsi_div == "bullish":
                 result["track_3"]["score"] += 1
-                result["track_3"]["details"]["4.1H RSI超卖或底背离"] = f"✅ 1h RSI={rsi_1h if rsi_1h else 'N/A'}, 背离={rsi_div or '无'}"
+                rsi_div_str = rsi_div if rsi_div else "无"
+                result["track_3"]["details"]["4.1H RSI超卖或底背离"] = f"✅ 1h RSI={rsi_1h_str}, 背离={rsi_div_str}"
             else:
-                result["track_3"]["details"]["4.1H RSI超卖或底背离"] = f"❌ 1h RSI={rsi_1h if rsi_1h else 'N/A'}"
+                result["track_3"]["details"]["4.1H RSI超卖或底背离"] = f"❌ 1h RSI={rsi_1h_str}"
 
             if kdj_1h.get("j") is not None and kdj_1h["j"] < 0:
                 result["track_3"]["score"] += 1
-                result["track_3"]["details"]["5.1H KDJ超卖"] = f"✅ J={kdj_1h['j']:.1f} < 0"
+                result["track_3"]["details"]["5.1H KDJ超卖"] = f"✅ J={kdj_j_str} < 0"
             else:
-                result["track_3"]["details"]["5.1H KDJ超卖"] = f"❌ J={kdj_1h.get('j', 'N/A')}"
+                result["track_3"]["details"]["5.1H KDJ超卖"] = f"❌ J={kdj_j_str}"
 
-            # 出现止跌形态
             if klines and len(klines) >= 2:
                 last = klines[-1]
                 body = abs(last["close"] - last["open"])
@@ -310,24 +316,22 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_3"]["details"]["6.30m止跌形态"] = "❌ 数据不足"
 
         # ============================================================
-        # 轨道4：趋势回踩做多（新增）
-        # 硬条件：日线多头 + 4H多头
+        # 轨道4：趋势回踩做多
         # ============================================================
         if trend_1d != "up" or trend_4h != "up":
             result["track_4"]["details"]["硬条件"] = f"❌ 需1D多头+4H多头（当前1D={trend_1d or '?'}, 4H={trend_4h or '?'}）"
         else:
             result["track_4"]["hard_ok"] = True
-            result["track_4"]["details"]["硬条件"] = f"✅ 1D多头 + 4H多头"
+            result["track_4"]["details"]["硬条件"] = "✅ 1D多头 + 4H多头"
 
-            # 回踩到1H布林中轨附近
             boll_mid = boll_1h.get("mid")
             if boll_mid and abs(price - boll_mid) / boll_mid <= 0.02:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["1.回踩1H布林中轨"] = f"✅ 现价{price:.4f}，中轨{boll_mid:.4f}"
             else:
-                result["track_4"]["details"]["1.回踩1H布林中轨"] = f"❌ 现价{price} 距中轨{boll_mid if boll_mid else 'N/A'}较远"
+                boll_mid_str = f"{boll_mid:.4f}" if boll_mid else "N/A"
+                result["track_4"]["details"]["1.回踩1H布林中轨"] = f"❌ 现价{price} 距中轨{boll_mid_str}较远"
 
-            # 缩量回踩
             if klines and len(klines) >= 6:
                 avg_vol = sum(k["volume"] for k in klines[-6:-1]) / 5
                 if klines[-1]["volume"] < avg_vol * 0.8:
@@ -338,7 +342,6 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_4"]["details"]["2.缩量回踩"] = "❌ 数据不足"
 
-            # 出现止跌形态
             if klines and len(klines) >= 2:
                 last = klines[-1]
                 body = abs(last["close"] - last["open"])
@@ -351,21 +354,19 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_4"]["details"]["3.30m止跌形态"] = "❌ 数据不足"
 
-            # 1H RSI在40-55之间（健康回踩区）
             if rsi_1h is not None and 40 <= rsi_1h <= 55:
                 result["track_4"]["score"] += 1
-                result["track_4"]["details"]["4.1H RSI健康"] = f"✅ RSI={rsi_1h:.1f}"
+                result["track_4"]["details"]["4.1H RSI健康"] = f"✅ RSI={rsi_1h_str}"
             else:
-                result["track_4"]["details"]["4.1H RSI健康"] = f"❌ RSI={rsi_1h if rsi_1h else 'N/A'}"
+                result["track_4"]["details"]["4.1H RSI健康"] = f"❌ RSI={rsi_1h_str}"
 
-            # 30m站上MA10
             if ma10 and price > ma10:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["5.站上30m MA10"] = f"✅ {price} > {ma10:.4f}"
             else:
-                result["track_4"]["details"]["5.站上30m MA10"] = f"❌ 未站上MA10"
+                ma10_str = f"{ma10:.4f}" if ma10 else "N/A"
+                result["track_4"]["details"]["5.站上30m MA10"] = f"❌ 未站上MA10({ma10_str})"
 
-            # 4H MACD未死叉（趋势健康）
             if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None and macd_4h["dif"] >= macd_4h["dea"]:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["6.4H MACD健康"] = "✅ DIF >= DEA"
@@ -375,7 +376,6 @@ class V1DefaultStrategy(BaseStrategy):
         # ============================================================
         # 最终触发判定
         # ============================================================
-        # 优先级：轨道2（做空）> 轨道4（回踩做多）> 轨道3（暴跌反弹）> 轨道1（底部突破）
         if result["track_2"]["hard_ok"] and result["track_2"].get("sub_type"):
             result["triggered"] = True
             result["direction"] = "short"
