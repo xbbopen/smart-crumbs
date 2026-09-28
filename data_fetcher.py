@@ -5,6 +5,7 @@
 2. 请求保护层强制最小请求间隔 + 指数退避重试
 3. 状态明确返回：ok / rate_limited / not_found / error
 4. 降级链路：Hyperliquid -> 币安现货 -> Gate.io现货（无条件兜底）
+5. 资金费率单位修复：Hyperliquid 返回的是小数，需 ×100 转为百分数
 """
 import time, requests
 import logging
@@ -43,6 +44,33 @@ def to_gate_spot(symbol: str) -> str:
 
 def to_hyperliquid_coin(symbol: str) -> str:
     return normalize_symbol(symbol)
+
+
+# ================= 资金费率单位转换 =================
+def _funding_to_percent(fr: float) -> float:
+    """
+    Hyperliquid 返回的 funding 是小数（0.0000125 表示 0.00125%/小时）。
+    此处统一乘以 100，转换为百分数形式（0.00125 表示 0.00125%）。
+    """
+    if fr is None:
+        return None
+    return fr * 100
+
+
+def _funding_to_percentile(fr_percent: float) -> float:
+    """
+    把百分数形式的费率映射为 0~1 的"拥挤度"参考值。
+    基准锚点：0.01%/小时 = 100%（极度拥挤）
+    Hyperliquid 正常范围：0.001%~0.003%/小时
+    警告区间：0.005%/小时 以上
+    极端区间：0.01%/小时 以上
+    """
+    if fr_percent is None:
+        return None
+    if fr_percent <= 0:
+        # 负费率：空头付钱，映射为负百分位
+        return max(-1.0, fr_percent / 0.01)
+    return min(1.0, fr_percent / 0.01)
 
 
 # ================= 请求保护层 =================
@@ -152,7 +180,7 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=150):
 def fetch_hyperliquid_klines(symbol, interval="30m", limit=150, start_ms=None, end_ms=None):
     coin = to_hyperliquid_coin(symbol)
     now_ms = int(time.time() * 1000)
-    
+
     if start_ms and end_ms:
         start_t, end_t = start_ms, end_ms
     else:
@@ -170,6 +198,7 @@ def fetch_hyperliquid_klines(symbol, interval="30m", limit=150, start_ms=None, e
     return klines, "ok"
 
 def fetch_hyperliquid_metrics(symbol, current_price):
+    """获取资金费率、OI等合约指标。资金费率已正确转换为百分数"""
     coin = to_hyperliquid_coin(symbol)
     ok, data = _request_with_retry(HYPERLIQUID_INFO_URL, method="POST", source="hyperliquid", json={"type": "metaAndAssetCtxs"})
     if not ok or not data: return None
@@ -179,8 +208,17 @@ def fetch_hyperliquid_metrics(symbol, current_price):
             if asset.get("name", "").upper() == coin:
                 ctx = ctxs[i] if i < len(ctxs) else {}
                 oi_usd = float(ctx.get("openInterest", 0)) * current_price
-                return {"funding_rate": float(ctx.get("funding", 0)), "open_interest": oi_usd, "day_volume": float(ctx.get("dayNtlVlm", 0))}
-    except Exception: pass
+                # 🚀 核心修复：把 Hyperliquid 的小数费率 × 100 转为百分数
+                raw_fr = ctx.get("funding", 0)
+                fr_percent = _funding_to_percent(float(raw_fr))
+                return {
+                    "funding_rate_raw": float(raw_fr),       # 原始小数（用于调试）
+                    "funding_rate": fr_percent,              # 百分数形式（用于策略判断）
+                    "open_interest": oi_usd,
+                    "day_volume": float(ctx.get("dayNtlVlm", 0))
+                }
+    except Exception:
+        pass
     return None
 
 
@@ -233,12 +271,12 @@ def find_recent_low(klines, lookback=149):
 
 # ================= 构建 market_data =================
 def build_market_data(symbol, asset_type):
-    md = {"symbol": symbol, "asset_type": asset_type, "fetch_status": "ok", "data_mode": "futures", "klines": None, "klines_4h": None, "current_price": None, "funding_rate": None, "funding_percentile": None, "open_interest": None, "day_volume": None, "ma10": None, "atr": None, "rsi": None, "adx": None, "recent_high": None, "recent_low": None, "data_source": "Unknown"}
+    md = {"symbol": symbol, "asset_type": asset_type, "fetch_status": "ok", "data_mode": "futures", "klines": None, "klines_4h": None, "current_price": None, "funding_rate": None, "funding_rate_raw": None, "funding_percentile": None, "open_interest": None, "day_volume": None, "ma10": None, "atr": None, "rsi": None, "adx": None, "recent_high": None, "recent_low": None, "data_source": "Unknown"}
 
     if asset_type == "spot":
         klines, status = fetch_binance_spot_klines(symbol)
         source = "币安镜像 现货"
-        if not klines:  # 🚀 无条件尝试下一个数据源
+        if not klines:
             klines, status = fetch_gateio_spot_klines(symbol)
             source = "Gate.io 现货"
         if klines:
@@ -257,17 +295,15 @@ def build_market_data(symbol, asset_type):
 
     if not klines:
         log.warning(f"[{symbol}] Hyperliquid 无合约数据，降级到现货")
-        
-        # 🚀 第一步：尝试币安
+
         klines, status = fetch_binance_spot_klines(symbol)
         source = "币安镜像 现货（合约降级）"
-        
-        # 🚀 第二步：如果币安也失败（无论报什么错），无条件尝试 Gate.io
+
         if not klines:
             log.warning(f"[{symbol}] 币安无数据，继续降级尝试 Gate.io")
             klines, status = fetch_gateio_spot_klines(symbol)
             source = "Gate.io 现货（合约降级）"
-            
+
         if klines:
             md.update(_build_indicators(klines))
             md.update({"data_source": source, "data_mode": "spot"})
@@ -284,14 +320,13 @@ def build_market_data(symbol, asset_type):
 
     metrics = fetch_hyperliquid_metrics(symbol, current_price)
     if metrics:
-        md["funding_rate"] = metrics["funding_rate"]
+        md["funding_rate"] = metrics["funding_rate"]         # 百分数（如 0.00125）
+        md["funding_rate_raw"] = metrics["funding_rate_raw"] # 原始小数（如 0.0000125）
         md["open_interest"] = metrics["open_interest"]
         md["day_volume"] = metrics["day_volume"]
-        fr = metrics["funding_rate"]
-        if fr is not None:
-            if fr <= -0.005: md["funding_percentile"] = -1.0
-            elif fr <= 0: md["funding_percentile"] = fr / 0.01
-            else: md["funding_percentile"] = min(1.0, fr / 0.01)
+        # 用百分数计算拥挤度
+        md["funding_percentile"] = _funding_to_percentile(metrics["funding_rate"])
+        log.info(f"[{symbol}] 资金费率原始值: {metrics['funding_rate_raw']:.8f} | 转换后: {metrics['funding_rate']:.6f}% | 拥挤度: {md['funding_percentile']:.4f}")
     return md, "ok"
 
 
