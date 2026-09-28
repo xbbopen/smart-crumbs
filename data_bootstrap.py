@@ -3,7 +3,7 @@
 用法：
     python data_bootstrap.py --from-config
     python data_bootstrap.py --symbols BTC ETH SOL --intervals 30m 4h --days 365
-支持断点续传（DB里已有数据会跳过）。
+支持断点续传 + 30天分页窗口（兼容 Hyperliquid 的单次请求限制）。
 """
 import argparse
 import json
@@ -28,34 +28,52 @@ log = logging.getLogger(__name__)
 BJT = timezone(timedelta(hours=8))
 INTERVAL_MS = {"30m": 30 * 60 * 1000, "4h": 4 * 60 * 60 * 1000}
 
+# 🚀 固定分页窗口：30天（兼容 Hyperliquid 单次请求限制）
+PAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+
 
 def fetch_klines_paged(fetch_func, symbol, interval, start_ms, end_ms, page_interval_ms):
-    """分页拉取，单页上限5000根"""
+    """
+    分页拉取。每次请求固定 30 天窗口，避免超时/超限。
+    page_interval_ms 用于推进 cur 到下一根K线的时间戳。
+    """
     all_klines = []
     cur = start_ms
-    for _ in range(20):  # 最多20次分页
-        if cur >= end_ms:
-            break
-        chunk_end = min(cur + page_interval_ms * 5000, end_ms)
+    max_iter = 20  # 一年最多13页，20足够
+    iter_count = 0
+
+    while cur < end_ms and iter_count < max_iter:
+        iter_count += 1
+        chunk_end = min(cur + PAGE_WINDOW_MS, end_ms)
+
         klines, status = fetch_func(symbol, interval, 5000, cur, chunk_end)
+
         if not klines:
-            log.warning(f"    [{symbol}][{interval}] 分段拉取失败: {status}")
-            break
+            # 🚀 如果是 not_found，尝试缩短窗口到 7 天再试一次
+            if status == "not_found" and (chunk_end - cur) > 7 * 24 * 60 * 60 * 1000:
+                log.info(f"    [{symbol}][{interval}] 30天窗口失败，尝试7天窗口")
+                chunk_end = min(cur + 7 * 24 * 60 * 60 * 1000, end_ms)
+                klines, status = fetch_func(symbol, interval, 5000, cur, chunk_end)
+
+            if not klines:
+                log.warning(f"    [{symbol}][{interval}] 分页失败: {status}（已拉{len(all_klines)}根）")
+                break
+
         all_klines.extend(klines)
         last_ts = klines[-1]["timestamp"]
+
+        # 防止死循环
         if last_ts <= cur:
             break
+
+        # 推进到下一根K线
         cur = last_ts + page_interval_ms
+
     return all_klines
 
 
 def resolve_source(symbol, asset_type):
-    """
-    决定该标的的主源。返回 (source_name, fetch_func)
-    规则：
-    - futures + Hyperliquid有合约 → hyperliquid
-    - 其他所有情况 → binance_spot
-    """
+    """决定该标的的主源"""
     if asset_type == "futures":
         coin = to_hyperliquid_coin(symbol)
         if coin in get_hyperliquid_universe():
