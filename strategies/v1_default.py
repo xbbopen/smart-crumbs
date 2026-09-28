@@ -4,6 +4,91 @@ class V1DefaultStrategy(BaseStrategy):
     version = "v1_default"
     name = "参谋长多周期共振策略"
 
+    def _build_entry_plan(self, direction, cp, atr, rh, rl, ma10, boll_mid, trigger_type):
+        """
+        根据轨道类型生成分档入场计划。
+        返回：{"stages": [{weight, type, price, note}], "avg_price": xxx, "stop": xxx, "note": xxx}
+        """
+        stages = []
+        note = ""
+
+        if trigger_type == "long_trend":
+            # 底部突破：60%市价 + 40%回踩MA10
+            stage1_price = cp
+            stages.append({"weight": 60, "type": "market", "price": stage1_price, "note": "立即市价，抓住突破"})
+            if ma10 and ma10 < cp:
+                stages.append({"weight": 40, "type": "limit", "price": ma10 * 0.998, "note": f"回踩30m MA10({ma10:.4f})加仓"})
+            else:
+                stages.append({"weight": 40, "type": "limit", "price": cp * 0.98, "note": "回踩-2%加仓"})
+            stop = (rl - 2.0 * atr) if (rl and atr) else None
+            note = "底部突破初期，分两档入场，即使回踩也有子弹"
+
+        elif trigger_type == "short_reversal":
+            # 见顶做空：70%市价 + 30%反弹到前高+1%
+            stages.append({"weight": 70, "type": "market", "price": cp, "note": "立即市价，顶部窗口极短"})
+            if rh:
+                stages.append({"weight": 30, "type": "limit", "price": rh * 1.01, "note": f"反弹到前高上方({rh*1.01:.4f})再空"})
+            else:
+                stages.append({"weight": 30, "type": "limit", "price": cp * 1.02, "note": "反弹+2%再空"})
+            stop = (rh + 2.0 * atr) if (rh and atr) else None
+            note = "顶部反转需要快速占位，70%市价不要犹豫"
+
+        elif trigger_type == "short_trend_follow":
+            # 顺势做空：40%市价 + 60%反弹到1H布林中轨
+            # 如果当前价已经接近1H布林中轨，直接市价满仓
+            if boll_mid and abs(cp - boll_mid) / boll_mid <= 0.005:
+                stages.append({"weight": 100, "type": "market", "price": cp, "note": "已到1H布林中轨附近，直接满仓"})
+            else:
+                stages.append({"weight": 40, "type": "market", "price": cp, "note": "先建底仓"})
+                if boll_mid and boll_mid > cp:
+                    stages.append({"weight": 60, "type": "limit", "price": boll_mid * 0.998, "note": f"等反弹到1H布林中轨({boll_mid:.4f})再空"})
+                elif ma10 and ma10 > cp:
+                    stages.append({"weight": 60, "type": "limit", "price": ma10 * 0.998, "note": f"等反弹到30m MA10({ma10:.4f})再空"})
+                else:
+                    stages.append({"weight": 60, "type": "limit", "price": cp * 1.02, "note": "反弹+2%再空"})
+            stop = None
+            # 止损放在布林中轨上方或MA10上方
+            if boll_mid and atr:
+                stop = boll_mid + 1.5 * atr
+            elif ma10 and atr:
+                stop = ma10 + 1.5 * atr
+            elif rh and atr:
+                stop = rh + 1.5 * atr
+            note = "下跌中继的反弹很磨人，等反弹到关键位再空胜率更高"
+
+        elif trigger_type == "long_rebound":
+            # 暴跌反弹：30%市价 + 40%探底位 + 30%极值位
+            stages.append({"weight": 30, "type": "market", "price": cp, "note": "立即市价，抓第一波反弹"})
+            if atr and rl:
+                stages.append({"weight": 40, "type": "limit", "price": cp - 1.0 * atr, "note": f"下跌1倍ATR({cp - atr:.4f})补仓"})
+                stages.append({"weight": 30, "type": "limit", "price": rl * 0.99, "note": f"二次探底到前低附近({rl*0.99:.4f})加仓"})
+            else:
+                stages.append({"weight": 40, "type": "limit", "price": cp * 0.97, "note": "下跌-3%补仓"})
+                stages.append({"weight": 30, "type": "limit", "price": cp * 0.95, "note": "下跌-5%加仓"})
+            stop = (rl - 2.0 * atr) if (rl and atr) else None
+            note = "暴跌后往往有二次探底，分三档挂单防止一次被打光"
+
+        elif trigger_type == "long_pullback":
+            # 趋势回踩：70%市价 + 30%回踩布林中轨下方
+            stages.append({"weight": 70, "type": "market", "price": cp, "note": "回踩到位，立即市价"})
+            if boll_mid:
+                stages.append({"weight": 30, "type": "limit", "price": boll_mid * 0.99, "note": f"更深回踩到布林中轨下方({boll_mid*0.99:.4f})加仓"})
+            else:
+                stages.append({"weight": 30, "type": "limit", "price": cp * 0.98, "note": "回踩-2%加仓"})
+            stop = (ma10 - 1.5 * atr) if (ma10 and atr) else (rl - 2.0 * atr if (rl and atr) else None)
+            note = "趋势中的回踩是加仓机会，仓位可以重一些"
+
+        # 计算加权平均入场价
+        total_weight = sum(s["weight"] for s in stages)
+        avg_price = sum(s["price"] * s["weight"] for s in stages) / total_weight if total_weight > 0 else cp
+
+        return {
+            "stages": stages,
+            "avg_price": avg_price,
+            "stop": stop,
+            "note": note,
+        }
+
     def evaluate(self, symbol, asset_type, market_data):
         is_spot_mode = market_data.get("data_mode") == "spot"
 
@@ -13,6 +98,7 @@ class V1DefaultStrategy(BaseStrategy):
             "track_3": {"score": 0, "max": 6, "details": {}, "hard_ok": False, "name": "暴跌反弹做多"},
             "track_4": {"score": 0, "max": 6, "details": {}, "hard_ok": False, "name": "趋势回踩做多"},
             "triggered": False, "direction": None, "reason": "",
+            "entry_plan": None,
             "data_mode": "spot" if is_spot_mode else "futures",
             "multi_tf": {
                 "trend_1d": market_data.get("trend_1d"),
@@ -20,14 +106,6 @@ class V1DefaultStrategy(BaseStrategy):
                 "rsi_1h": market_data.get("rsi_1h"),
                 "rsi_4h": market_data.get("rsi_4h"),
                 "rsi_1d": market_data.get("rsi_1d"),
-                "ema50_1d": market_data.get("ema50_1d"),
-                "ema20_4h": market_data.get("ema20_4h"),
-                "ema50_4h": market_data.get("ema50_4h"),
-                "boll_1h": market_data.get("boll_1h"),
-                "macd_1h": market_data.get("macd_1h"),
-                "macd_4h": market_data.get("macd_4h"),
-                "kdj_1h": market_data.get("kdj_1h"),
-                "rsi_div_1h": market_data.get("rsi_div_1h"),
             }
         }
 
@@ -38,35 +116,29 @@ class V1DefaultStrategy(BaseStrategy):
         rl = market_data.get("recent_low")
         adx = market_data.get("adx")
         klines = market_data.get("klines_30m", [])
-        klines_1h = market_data.get("klines_1h", [])
         fp = market_data.get("funding_percentile")
         trend_4h = market_data.get("trend_4h")
         trend_1d = market_data.get("trend_1d")
         rsi_1h = market_data.get("rsi_1h")
-        rsi_4h = market_data.get("rsi_4h")
-        rsi_1d = market_data.get("rsi_1d")
         kdj_1h = market_data.get("kdj_1h") or {}
         boll_1h = market_data.get("boll_1h") or {}
         macd_1h = market_data.get("macd_1h") or {}
         macd_4h = market_data.get("macd_4h") or {}
         rsi_div = market_data.get("rsi_div_1h")
+        atr = market_data.get("atr")
+        boll_mid = boll_1h.get("mid")
 
         if price is None or rsi is None or rh is None or rl is None:
             result["track_1"]["details"]["数据不足"] = "❌ 核心指标缺失"
             return result
 
-        # 🚀 预先计算所有可能为None的指标字符串，避免 f-string 报错
         rsi_str = f"{rsi:.1f}"
         rsi_1h_str = f"{rsi_1h:.1f}" if rsi_1h is not None else "N/A"
-        rsi_4h_str = f"{rsi_4h:.1f}" if rsi_4h is not None else "N/A"
-        rsi_1d_str = f"{rsi_1d:.1f}" if rsi_1d is not None else "N/A"
         kdj_j_str = f"{kdj_1h['j']:.1f}" if kdj_1h.get("j") is not None else "N/A"
 
-        # ADX 分层门槛
         adx_ok_trend = adx is not None and adx >= 20
         adx_ok_reversal = adx is not None and adx >= 12
 
-        # 计算CVD
         cvd_series = []
         if klines:
             cvd = 0
@@ -74,9 +146,7 @@ class V1DefaultStrategy(BaseStrategy):
                 cvd += k["volume"] * (1 if k["close"] >= k["open"] else -1)
                 cvd_series.append(cvd)
 
-        # ============================================================
-        # 轨道1：底部突破做多
-        # ============================================================
+        # ============ 轨道1：底部突破做多 ============
         if trend_1d == "down" or trend_4h == "down":
             result["track_1"]["details"]["硬条件"] = f"❌ 大趋势逆风（1D={trend_1d or '?'}, 4H={trend_4h or '?'}）"
         else:
@@ -124,9 +194,7 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_1"]["details"]["6.4H MACD金叉"] = "❌ 4H MACD未金叉"
 
-        # ============================================================
-        # 轨道2A：见顶做空（反转）
-        # ============================================================
+        # ============ 轨道2：做空 ============
         if trend_1d == "up" or trend_4h == "up":
             result["track_2"]["details"]["硬条件"] = f"❌ 大趋势逆风（1D={trend_1d or '?'}, 4H={trend_4h or '?'}）"
         elif not adx_ok_trend:
@@ -136,6 +204,7 @@ class V1DefaultStrategy(BaseStrategy):
             result["track_2"]["hard_ok"] = True
             result["track_2"]["details"]["硬条件"] = f"✅ 1D={trend_1d or '?'} + 4H={trend_4h or '?'} + ADX≥20"
 
+            # 2A 见顶做空
             result["track_2"]["details"]["──────── 📌 见顶做空（反转）────────"] = ""
             reversal_score = 0
 
@@ -185,9 +254,7 @@ class V1DefaultStrategy(BaseStrategy):
 
             result["track_2"]["details"]["📊 见顶做空得分"] = f"{reversal_score}/6"
 
-            # ============================================================
-            # 轨道2B：顺势做空
-            # ============================================================
+            # 2B 顺势做空
             result["track_2"]["details"]["──────── 📉 顺势做空（趋势延续）────────"] = ""
             tf_score = 0
 
@@ -243,7 +310,6 @@ class V1DefaultStrategy(BaseStrategy):
 
             result["track_2"]["details"]["📊 顺势做空得分"] = f"{tf_score}/6"
 
-            # 最终判定：见顶优先，顺势兜底
             if reversal_score >= 4:
                 result["track_2"]["sub_type"] = "reversal"
                 result["track_2"]["score"] = reversal_score
@@ -251,11 +317,9 @@ class V1DefaultStrategy(BaseStrategy):
             elif tf_score >= 4:
                 result["track_2"]["sub_type"] = "trend_follow"
                 result["track_2"]["score"] = tf_score
-                result["track_2"]["reason"] = f"顺势做空 {tf_score}/6 触发（已错过完美顶部）"
+                result["track_2"]["reason"] = f"顺势做空 {tf_score}/6 触发"
 
-        # ============================================================
-        # 轨道3：暴跌反弹做多
-        # ============================================================
+        # ============ 轨道3：暴跌反弹做多 ============
         if trend_1d == "down":
             result["track_3"]["details"]["硬条件"] = "❌ 1D趋势向下，禁止抄底"
         elif not adx_ok_reversal:
@@ -315,16 +379,13 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_3"]["details"]["6.30m止跌形态"] = "❌ 数据不足"
 
-        # ============================================================
-        # 轨道4：趋势回踩做多
-        # ============================================================
+        # ============ 轨道4：趋势回踩做多 ============
         if trend_1d != "up" or trend_4h != "up":
             result["track_4"]["details"]["硬条件"] = f"❌ 需1D多头+4H多头（当前1D={trend_1d or '?'}, 4H={trend_4h or '?'}）"
         else:
             result["track_4"]["hard_ok"] = True
             result["track_4"]["details"]["硬条件"] = "✅ 1D多头 + 4H多头"
 
-            boll_mid = boll_1h.get("mid")
             if boll_mid and abs(price - boll_mid) / boll_mid <= 0.02:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["1.回踩1H布林中轨"] = f"✅ 现价{price:.4f}，中轨{boll_mid:.4f}"
@@ -373,27 +434,31 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_4"]["details"]["6.4H MACD健康"] = "❌ 4H MACD已死叉"
 
-        # ============================================================
-        # 最终触发判定
-        # ============================================================
+        # ============ 最终触发判定 + 生成入场计划 ============
         if result["track_2"]["hard_ok"] and result["track_2"].get("sub_type"):
             result["triggered"] = True
             result["direction"] = "short"
             result["reason"] = result["track_2"]["reason"]
+            trigger_type = "short_reversal" if result["track_2"]["sub_type"] == "reversal" else "short_trend_follow"
+            result["entry_plan"] = self._build_entry_plan("short", price, atr, rh, rl, ma10, boll_mid, trigger_type)
             if is_spot_mode:
                 result["direction"] = "spot_warning"
                 result["reason"] = result["track_2"]["reason"].replace("做空", "逃顶预警")
+                result["entry_plan"] = None  # 现货不做空，不给入场计划
         elif result["track_4"]["hard_ok"] and result["track_4"]["score"] >= 4:
             result["triggered"] = True
             result["direction"] = "long_pullback"
             result["reason"] = f"趋势回踩做多 {result['track_4']['score']}/6 触发"
+            result["entry_plan"] = self._build_entry_plan("long", price, atr, rh, rl, ma10, boll_mid, "long_pullback")
         elif result["track_3"]["hard_ok"] and result["track_3"]["score"] >= 4:
             result["triggered"] = True
             result["direction"] = "long_rebound"
             result["reason"] = f"暴跌反弹 {result['track_3']['score']}/6 触发"
+            result["entry_plan"] = self._build_entry_plan("long", price, atr, rh, rl, ma10, boll_mid, "long_rebound")
         elif result["track_1"]["hard_ok"] and result["track_1"]["score"] >= 4:
             result["triggered"] = True
             result["direction"] = "long_trend"
             result["reason"] = f"底部突破 {result['track_1']['score']}/6 触发"
+            result["entry_plan"] = self._build_entry_plan("long", price, atr, rh, rl, ma10, boll_mid, "long_trend")
 
         return result
