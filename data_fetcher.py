@@ -1,17 +1,10 @@
 """
-统一数据获取模块（DB优先 + API增量 + 源切换保护）
-核心逻辑：
-1. 决定主源（Hyperliquid或币安现货）
-2. 查DB主源最后时间戳 → 拉增量 → 写DB
-3. 读取时优先只读主源
-4. 主源数据不足时混合读取，并在md里打 source_mixed 标记
+统一数据获取模块（DB优先 + 增量 + 源切换保护 + 从最近N根探测）
 """
 import time, requests
 import logging
 
-from data_db import (
-    get_last_timestamp, upsert_klines, load_klines, count_klines
-)
+from data_db import get_last_timestamp, upsert_klines, load_klines, count_klines
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +18,6 @@ INTERVAL_MS_MAP = {
     "1d": 24 * 60 * 60 * 1000,
 }
 
-# ================= 别名映射 =================
 _HL_ALIAS = {
     "1000PEPE": "kPEPE", "1000BONK": "kBONK", "1000SHIB": "kSHIB",
     "1000FLOKI": "kFLOKI", "1000LUNC": "kLUNC", "1000DOGS": "kDOGS",
@@ -43,7 +35,6 @@ _BINANCE_SPOT_ALIAS = {
     "1000FLOKI": "FLOKI", "1000LUNC": "LUNC",
 }
 
-# ================= 缓存与限流 =================
 _HL_UNIVERSE_CACHE = None
 _HL_UNIVERSE_TIME = 0
 _HL_UNIVERSE_TTL = 3600
@@ -80,8 +71,7 @@ def _funding_to_percent(fr):
 
 def _funding_to_percentile(fr_percent):
     if fr_percent is None: return None
-    if fr_percent <= 0:
-        return max(-1.0, fr_percent / 0.01)
+    if fr_percent <= 0: return max(-1.0, fr_percent / 0.01)
     return min(1.0, fr_percent / 0.01)
 
 
@@ -111,12 +101,10 @@ def _request_with_retry(url, method="GET", source="binance", max_retries=3, **kw
             r.raise_for_status()
             return True, r.json()
         except requests.exceptions.HTTPError:
-            if attempt == max_retries - 1:
-                return False, "error"
+            if attempt == max_retries - 1: return False, "error"
             time.sleep(2 ** attempt)
         except Exception:
-            if attempt == max_retries - 1:
-                return False, "error"
+            if attempt == max_retries - 1: return False, "error"
             time.sleep(2 ** attempt)
     return False, "rate_limited"
 
@@ -128,8 +116,7 @@ def get_hyperliquid_universe():
         return _HL_UNIVERSE_CACHE
     ok, data = _request_with_retry(HYPERLIQUID_INFO_URL, method="POST",
                                     source="hyperliquid", json={"type": "meta"})
-    if not ok or not isinstance(data, dict):
-        return set()
+    if not ok or not isinstance(data, dict): return set()
     result = set(a["name"].upper() for a in data.get("universe", []) if "name" in a)
     _HL_UNIVERSE_CACHE = result
     _HL_UNIVERSE_TIME = now
@@ -153,8 +140,7 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=200, start_ms=None, 
     binance_sym = to_binance_spot(symbol)
     url = f"{BINANCE_MIRROR}/api/v3/klines"
     result = _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end_ms)
-    if result[0]:
-        return result
+    if result[0]: return result
     alt_sym = to_binance_spot_fallback(symbol)
     if alt_sym != binance_sym:
         return _fetch_binance_klines_inner(url, alt_sym, interval, limit, start_ms, end_ms)
@@ -164,7 +150,7 @@ def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end
     all_klines = []
     if start_ms and end_ms:
         cur = start_ms
-        for _ in range(10):
+        for _ in range(3):
             if cur >= end_ms: break
             chunk_end = min(cur + 5000 * INTERVAL_MS_MAP.get(interval, 30*60*1000), end_ms)
             params = {"symbol": binance_sym, "interval": interval,
@@ -201,8 +187,7 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
         if alt_sym != gate_sym:
             params["currency_pair"] = alt_sym
             ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
-        if not ok or not data:
-            return None, "not_found"
+        if not ok or not data: return None, "not_found"
     klines = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]),
                "close": float(item[2]), "high": float(item[3]),
                "low": float(item[4]), "open": float(item[5])} for item in data]
@@ -245,14 +230,39 @@ def fetch_hyperliquid_metrics(symbol, current_price):
                 return {"funding_rate_raw": float(raw_fr), "funding_rate": fr_percent,
                         "open_interest": oi_usd,
                         "day_volume": float(ctx.get("dayNtlVlm", 0))}
-    except Exception:
-        pass
+    except Exception: pass
     return None
 
 
-# ================= 🚀 源切换保护的K线获取 =================
+# ================= 🚀 从"最近N根"开始试探 =================
+_PROBE_SIZES = [50, 100, 200, 300, 500, 1000]
+
+def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
+    interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
+    now_ms = int(time.time() * 1000)
+    all_klines = []
+
+    for probe_size in _PROBE_SIZES:
+        if len(all_klines) >= target_bars:
+            break
+        start_ms = now_ms - (probe_size * interval_ms)
+        klines, status = fetch_func(symbol, interval, probe_size, start_ms, now_ms)
+        if klines:
+            all_klines = klines
+            log.info(f"    [{symbol}][{interval}] 试探{probe_size}根 → 拿到{len(klines)}根")
+            if len(klines) < probe_size:
+                log.info(f"    [{symbol}][{interval}] 数据边界到达，最终{len(klines)}根")
+                break
+        else:
+            log.info(f"    [{symbol}][{interval}] 试探{probe_size}根 → {status}")
+            if probe_size == _PROBE_SIZES[0]:
+                log.warning(f"    [{symbol}][{interval}] 连最近50根都拿不到，该源无此周期数据")
+                break
+    return all_klines[:target_bars]
+
+
+# ================= 主源判定 =================
 def get_primary_source(symbol, asset_type):
-    """返回该标的的当前主源名"""
     if asset_type == "futures":
         coin = to_hyperliquid_coin(symbol)
         if coin in get_hyperliquid_universe():
@@ -261,83 +271,63 @@ def get_primary_source(symbol, asset_type):
 
 
 def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
-    """
-    DB优先的K线获取，带源切换保护。
-    返回：(klines, source_info)
-    """
+    """DB优先。瀑布式降级：主源 → 币安 → Gate"""
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
 
-    # 1. 决定主源
     primary_source = get_primary_source(symbol, asset_type)
-
-    # 2. 查主源在DB里的最后时间戳
     last_ts = get_last_timestamp(symbol, interval, source=primary_source)
+
+    actual_source = primary_source
+    klines_new = []
+
     if last_ts:
         fetch_start = last_ts + interval_ms
-    else:
-        fetch_start = now_ms - (desired_bars * interval_ms)
-
-    # 3. 拉增量（瀑布式降级：主源 → 币安 → Gate，无条件依次尝试）
-    actual_source = primary_source
-    if fetch_start < now_ms:
-        klines_new = []
-
-        # 第一层：主源
-        if primary_source == "hyperliquid":
-            klines_new, _ = fetch_hyperliquid_klines(symbol, interval, 5000, fetch_start, now_ms)
-            if klines_new:
-                actual_source = "hyperliquid"
-
-        # 第二层：币安现货（无条件尝试，只要上一层失败）
-        if not klines_new:
-            klines_new, _ = fetch_binance_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-            if klines_new:
+        if fetch_start >= now_ms:
+            log.info(f"[{symbol}][{interval}] 数据已最新")
+        else:
+            if primary_source == "hyperliquid":
+                klines_new, _ = fetch_hyperliquid_klines(symbol, interval, 5000, fetch_start, now_ms)
+                if klines_new: actual_source = "hyperliquid"
+            if not klines_new:
+                klines_new, _ = fetch_binance_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
                 actual_source = "binance_spot"
-
-        # 第三层：Gate现货（无条件尝试，只要上面都失败）
-        if not klines_new:
-            klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-            if klines_new:
+            if not klines_new:
+                klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
                 actual_source = "gate_spot"
+    else:
+        log.warning(f"[{symbol}][{interval}] DB无数据，从最近N根探测")
+        if primary_source == "hyperliquid":
+            klines_new = fetch_klines_from_now(fetch_hyperliquid_klines, symbol, interval, desired_bars)
+            if klines_new: actual_source = "hyperliquid"
+        if not klines_new:
+            klines_new = fetch_klines_from_now(fetch_binance_spot_klines, symbol, interval, desired_bars)
+            actual_source = "binance_spot"
+        if not klines_new:
+            klines_new = fetch_klines_from_now(fetch_gateio_spot_klines, symbol, interval, desired_bars)
+            actual_source = "gate_spot"
 
-        if klines_new:
-            upsert_klines(symbol, interval, klines_new, source=actual_source)
+    if klines_new:
+        upsert_klines(symbol, interval, klines_new, source=actual_source)
 
-    # 4. 🚀 关键修复：不再按 source 过滤，直接读全部数据
-    # 因为 source 字段只用于审计，指标计算不需要区分
+    # 读取时不再过滤 source
     klines_all = load_klines(symbol, interval, desired_bars, source=None)
-
-    if len(klines_all) >= desired_bars:
-        # 数据充足，返回。同时告知调用方当前主源和实际源是否一致
+    if len(klines_all) >= 50:
         return klines_all, {
-            "primary": primary_source,
-            "actual": actual_source,
+            "primary": primary_source, "actual": actual_source,
             "mixed": primary_source != actual_source,
             "primary_count": len(klines_all),
         }
 
-    # 5. DB数据不足，走API兜底
-    log.warning(f"[{symbol}][{interval}] DB数据不足({len(klines_all)}根)，从API全量拉")
-    fallback_klines = None
-    if primary_source == "hyperliquid":
-        fallback_klines, _ = fetch_hyperliquid_klines(symbol, interval, desired_bars)
-    if not fallback_klines:
-        fallback_klines, _ = fetch_binance_spot_klines(symbol, interval, desired_bars)
-        actual_source = "binance_spot"
-    if not fallback_klines:
-        fallback_klines, _ = fetch_gateio_spot_klines(symbol, interval, desired_bars)
-        actual_source = "gate_spot"
-
-    return (fallback_klines or []), {
-        "primary": primary_source,
-        "actual": actual_source,
-        "mixed": False,
-        "primary_count": len(fallback_klines or []),
+    # 兜底
+    fallback = klines_new or []
+    return fallback, {
+        "primary": primary_source, "actual": actual_source,
+        "mixed": False, "primary_count": len(fallback),
     }
 
 
-# ================= 技术指标 =================
+# ================= 技术指标（不变） =================
 def calc_ma(klines, period=10):
     if len(klines) < period: return None
     return sum(k["close"] for k in klines[-period:]) / period
@@ -492,12 +482,12 @@ def build_market_data(symbol, asset_type):
 
     if is_hl:
         klines_30m, info_30m = fetch_and_cache_klines(symbol, "futures", "30m", 500)
-        klines_4h, info_4h = fetch_and_cache_klines(symbol, "futures", "4h", 500)
+        klines_4h, info_4h = fetch_and_cache_klines(symbol, "futures", "4h", 2000)
         md["data_mode"] = "futures"
         base_source = "Hyperliquid 合约"
     else:
         klines_30m, info_30m = fetch_and_cache_klines(symbol, "spot", "30m", 500)
-        klines_4h, info_4h = fetch_and_cache_klines(symbol, "spot", "4h", 500)
+        klines_4h, info_4h = fetch_and_cache_klines(symbol, "spot", "4h", 2000)
         md["data_mode"] = "spot"
         base_source = "现货（合约降级或原生现货）"
 
@@ -505,16 +495,10 @@ def build_market_data(symbol, asset_type):
         md["fetch_status"] = "unsupported"
         return md, "unsupported"
 
-    # 🚀 源切换保护：记录主源和混合标记
     md["primary_source"] = info_30m["primary"]
     md["source_mixed"] = info_30m["mixed"] or info_4h["mixed"]
-    if md["source_mixed"]:
-        md["data_source"] = (f"{base_source} ⚠️ 数据源混合（主源{info_30m['primary']} 仅"
-                             f"{info_30m['primary_count']}根30m）")
-    else:
-        md["data_source"] = base_source
+    md["data_source"] = base_source
 
-    # 聚合
     klines_1h = aggregate_klines(klines_30m, 2)
     if not klines_4h:
         klines_4h = aggregate_klines(klines_30m, 8)
@@ -526,7 +510,6 @@ def build_market_data(symbol, asset_type):
     md["klines_1d"] = klines_1d
     md["current_price"] = klines_30m[-1]["close"]
 
-    # 30m指标
     md["ma10"] = calc_ma(klines_30m, 10)
     md["atr"] = calc_atr(klines_30m, 14)
     md["rsi"] = calc_rsi(klines_30m, 14)
@@ -534,7 +517,6 @@ def build_market_data(symbol, asset_type):
     md["recent_high"] = find_recent_high(klines_30m, 199)
     md["recent_low"] = find_recent_low(klines_30m, 199)
 
-    # 1h指标
     if len(klines_1h) >= 20:
         md["rsi_1h"] = calc_rsi(klines_1h, 14)
         k, d, j = calc_kdj(klines_1h, 9)
@@ -546,7 +528,6 @@ def build_market_data(symbol, asset_type):
         rsi_series = calc_rsi_series(klines_1h, 14)
         md["rsi_div_1h"] = detect_rsi_divergence(klines_1h, rsi_series)
 
-    # 4h指标
     if len(klines_4h) >= 50:
         md["ema20_4h"] = calc_ema(klines_4h, 20)
         md["ema50_4h"] = calc_ema(klines_4h, 50)
@@ -554,12 +535,10 @@ def build_market_data(symbol, asset_type):
         dif, dea, hist = calc_macd(klines_4h)
         md["macd_4h"] = {"dif": dif, "dea": dea, "hist": hist}
 
-    # 1d指标
     if len(klines_1d) >= 50:
         md["ema50_1d"] = calc_ema(klines_1d, 50)
         md["rsi_1d"] = calc_rsi(klines_1d, 14)
 
-    # 趋势判断
     price = md["current_price"]
     if md["ema20_4h"] and md["ema50_4h"]:
         if md["ema20_4h"] > md["ema50_4h"] and price > md["ema20_4h"]:
@@ -576,7 +555,6 @@ def build_market_data(symbol, asset_type):
         else:
             md["trend_1d"] = "neutral"
 
-    # 合约指标
     if md["data_mode"] == "futures" and is_hl:
         metrics = fetch_hyperliquid_metrics(symbol, price)
         if metrics:
