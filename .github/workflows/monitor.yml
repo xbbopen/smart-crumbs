@@ -9,9 +9,6 @@ concurrency:
   group: market-monitor
   cancel-in-progress: false
 
-permissions:
-  contents: write
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -20,7 +17,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # 🚀 从 Cache 恢复数据库（如果存在）
+      - name: 恢复数据库
+        uses: actions/cache@v4
+        with:
+          path: data/market.db
+          key: market-db-${{ github.run_id }}
+          restore-keys: |
+            market-db-
+
       - run: pip install -r requirements.txt
+
       - name: 运行监控
         run: python monitor.py
         env:
@@ -29,10 +37,18 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-      - name: 提交更新的数据库
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/market.db
-          git diff --staged --quiet || git commit -m "🤖 更新行情数据库 [skip ci]"
-          git push || echo "推送失败"
+
+      # 🚀 把更新后的DB存回 Cache（每次新 key，自动累积）
+      - name: 保存数据库到 Cache
+        uses: actions/cache@v4
+        with:
+          path: data/market.db
+          key: market-db-${{ github.run_id }}
+
+      # 🚀 可选：把DB也上传为 artifact，方便你随时下载备份
+      - name: 上传数据库备份
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-db-backup
+          path: data/market.db
+          retention-days: 7
