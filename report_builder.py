@@ -3,11 +3,9 @@ import random
 
 BJT = timezone(timedelta(hours=8))
 
-# ================= 资产类型翻译 =================
 def translate_asset_type(asset_type):
     return {"futures": "合约", "spot": "现货"}.get(asset_type, asset_type)
 
-# ================= 信号条件的通俗解释 =================
 CONDITION_EXPLANATIONS = {
     "1.1-底部区域": "价格是否跌到了主力近期洗盘的底线（狙击区）",
     "1.2-站上MA10": "短期生命线是否收复（多军开始反击）",
@@ -26,18 +24,16 @@ CONDITION_EXPLANATIONS = {
     "数据不足": "数据源获取失败（跳过本次推演）"
 }
 
-# ================= 指标词典 =================
 SIGNAL_GLOSSARY = {
     "ADX": "趋势强度指标。没有20以上的ADX，所有突破都可能是假动作。",
     "CVD": "量价背离神器。价格骗人，但资金的流向骗不了人。",
-    "资金费率百分位": "看谁在裸泳。费率极高说明多头拥挤，主力随时可能来个'天地针'爆仓。注意：Hyperliquid每小时结算，正常费率在0.001%-0.005%，0.01%以上即为极端。",
+    "资金费率": "看谁在裸泳。正费率表示多头付钱给空头（多头拥挤），负费率表示空头付钱给多头。Hyperliquid 每小时结算，正常费率在0.001%~0.003%/小时，0.005%以上为警告，0.01%以上为极端。",
     "RSI": "相对强弱指数。70以上是贪婪，35以下是恐慌。",
     "MA10": "短期生命线，站上偏强，跌破偏弱。",
     "ATR": "波动幅度，用来精准计算你的止损点和爆仓距离。",
     "4H趋势过滤": "逆势做单，死路一条。4小时方向不对，坚决不碰。",
 }
 
-# ================= 🚀 用户自定义横幅 Banner =================
 AD_BANNER = """
 <div style="text-align: center; margin-bottom: 20px;">
     <img src="https://raw.githubusercontent.com/xbbopen/smart-crumbs/main/banner.png" 
@@ -47,16 +43,13 @@ AD_BANNER = """
 </div>
 """
 
-# ================= 流动性/杠杆建议 =================
-def get_leverage_advice(oi, is_spot_mode=False):
-    if is_spot_mode: return "现货模式，建议3x以下轻仓。"
+def get_leverage_advice(oi):
     if oi is None: return "数据受限，建议3x以下轻仓试错。"
     if oi > 500_000_000: return "【资金极度充裕】建议杠杆20x-50x（快进快出）。"
     if oi > 50_000_000: return "【流动性极佳】建议杠杆10x-20x。"
     if oi > 5_000_000: return "【中等流动性】建议杠杆5x-10x。"
     return "【流动性差】建议杠杆2x-3x（极易被插针，保命要紧）。"
 
-# ================= 计算止损、仓位、三段式移动止盈 =================
 def calc_trade_plan(direction, cp, atr, rh, rl):
     plan = {"stop": None, "risk_pct": 0, "position_pct": 0, "position_value": 0, "margin_10x": 0, "coin_amount": 0, "tp1_trigger": None, "tp1_stop": None, "tp2_trigger": None, "tp2_stop": None, "tp3_trigger": None, "tp3_stop": None}
     if direction == "short" and atr and rh:
@@ -80,7 +73,6 @@ def calc_trade_plan(direction, cp, atr, rh, rl):
         plan["coin_amount"] = plan["position_value"] / cp if cp else 0
     return plan
 
-# ================= 🚀 参谋长行情阶段推演器 =================
 def generate_market_stage(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
@@ -88,7 +80,6 @@ def generate_market_stage(r):
     ma10 = md.get("ma10")
     rh = md.get("recent_high")
     rl = md.get("recent_low")
-    adx = md.get("adx")
 
     if cp is None or rl is None or rh is None:
         return "数据不足", "无法推演当前阶段。"
@@ -104,19 +95,19 @@ def generate_market_stage(r):
     else:
         return "⏳ 震荡期（蓄势待发）", "行情处于区间震荡中，多空力量均衡，主力正在等待方向选择。保持耐心，等待开枪信号。"
 
-# ================= 参谋长专属解读引擎 =================
 def generate_commander_comment(r, is_triggered):
     md = r.get("market_data", {})
     sr_list = r.get("strategy_results", {})
-    cp = r.get("current_price")
     rsi = md.get("rsi")
     adx = md.get("adx")
     fp = md.get("funding_percentile")
+    fr = md.get("funding_rate")  # 百分数形式
     is_spot_mode = md.get("data_mode") == "spot"
 
     rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
     adx_str = f"{adx:.1f}" if adx is not None else "N/A"
-    fp_str = f"{fp:.0%}" if fp is not None else "N/A"
+    fp_str = f"{fp:.1%}" if fp is not None else "N/A"
+    fr_str = f"{fr:.4f}%" if fr is not None else "N/A"
 
     best_sr, max_score = None, -1
     for sname, sr in sr_list.items():
@@ -129,7 +120,7 @@ def generate_commander_comment(r, is_triggered):
     if is_triggered and best_sr:
         direction = best_sr.get("direction")
         if direction == "short":
-            comment = f"兄弟们，{r['symbol']} 主力磨刀霍霍了！RSI飙到{rsi_str}，资金费率拥挤度{fp_str}，多头极其拥挤。这种时候就是主力准备'一锅端'的信号！参谋长已经扣动扳机，准备迎接瀑布。记住，带好2%止损，别让到嘴的肉飞了！"
+            comment = f"兄弟们，{r['symbol']} 主力磨刀霍霍了！RSI飙到{rsi_str}，当前资金费率{fr_str}，多头拥挤度{fp_str}。这种时候就是主力准备'一锅端'的信号！参谋长已经扣动扳机，准备迎接瀑布。记住，带好2%止损，别让到嘴的肉飞了！"
         elif direction == "spot_warning":
             comment = f"警报！{r['symbol']} 现货模式出现逃顶信号！RSI高达{rsi_str}，价格逼近前高。参谋长提醒：现货不可做空，建议现有多单逐步止盈或减仓，保住利润，防范即将到来的回调风险！"
         elif direction == "long_rebound":
@@ -145,18 +136,17 @@ def generate_commander_comment(r, is_triggered):
             if is_spot_mode:
                 comment = f"注意风险！{r['symbol']} RSI高达{rsi_str}，现货模式不可做空，请现有多单注意止盈，防范回调！"
             else:
-                comment = f"注意风险！{r['symbol']} RSI高达{rsi_str}，价格已经在高位了。别被FOMO情绪冲昏头脑，现在追多就是接盘侠。参谋长在等它见顶信号，准备反手做空！"
+                comment = f"注意风险！{r['symbol']} RSI高达{rsi_str}，价格已经在高位了。当前资金费率{fr_str}。别被FOMO情绪冲昏头脑，现在追多就是接盘侠。参谋长在等它见顶信号，准备反手做空！"
         elif rsi is not None and rsi <= 35:
             comment = f"机会在酝酿！{r['symbol']} RSI已经砸到{rsi_str}，极度恐慌区。虽然还没到参谋长的开枪点位，但子弹已经上膛。一旦确认企稳，这里就是暴利反弹的起点！"
-        elif fp is not None and fp >= 0.8 and not is_spot_mode:
-            comment = f"{r['symbol']} 资金费率拥挤度达到了{fp_str}，多头太嗨了，这种时候往往危险。参谋长虽然暂时没开枪，但已经在找机会布局空单，准备收割这群狂欢的韭菜。"
+        elif fr is not None and fr > 0.005 and not is_spot_mode:
+            comment = f"{r['symbol']} 当前资金费率达到 {fr_str}（拥挤度{fp_str}），多头太嗨了，这种时候往往危险。参谋长虽然暂时没开枪，但已经在找机会布局空单，准备收割这群狂欢的韭菜。"
         else:
             if max_score == 3: comment = f"马上要触发了！{r['symbol']} 各项指标都在临界点，主力意图已经暴露，参谋长正在死死盯盘。兄弟们保持关注，只要条件达标，我立马通知你们进场！"
             elif max_score == 2: comment = f"{r['symbol']} 盘面暗流涌动，虽然还没完全达标，但主力的小动作已经藏不住了。耐心是猎人最好的品质，等参谋长信号，我们一起精准狙击。"
             else: comment = f"{r['symbol']} 目前处于垃圾时间，各项指标都不达标，主力还在洗盘。参谋长从不打无准备之仗，空仓休息也是一种操作，等信号出来，我第一时间喊单！"
     return f"<div style='background:#f8f9fa; padding:12px; border-left:5px solid #3498db; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#2c3e50;'>{comment}</span></div>"
 
-# ================= 标的独立卡片 =================
 def build_symbol_block(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
@@ -199,13 +189,14 @@ def build_symbol_block(r):
 
     data_source = md.get('data_source') or '未知数据源'
     funding_pct = md.get('funding_percentile')
+    funding_rate = md.get('funding_rate')  # 百分数
 
-    # 头部信息根据模式切换
     if is_spot_mode:
-        header_info = f"<div><b>当前价格：</b><span style='color: {border_color}; font-size: 1.2em; font-weight: bold;'>{cp_str}</span></div><div><b>模式：</b>现货分析（Hyperliquid无此合约）⚠️</div><div><b>资金费率：</b>现货无此数据</div>"
+        header_info = f"<div><b>当前价格：</b><span style='color: {border_color}; font-size: 1.2em; font-weight: bold;'>{cp_str}</span></div><div><b>模式：</b>现货分析 ⚠️</div><div><b>资金费率：</b>现货无此数据</div>"
     else:
-        fp_str = f"{funding_pct:.0%}" if funding_pct is not None else "N/A"
-        header_info = f"<div><b>当前价格：</b><span style='color: {border_color}; font-size: 1.2em; font-weight: bold;'>{cp_str}</span></div><div><b>数据源：</b>{data_source}</div><div><b>费率拥挤度：</b>{fp_str}</div>"
+        fp_str = f"{funding_pct:.1%}" if funding_pct is not None else "N/A"
+        fr_str = f"{funding_rate:.4f}%" if funding_rate is not None else "N/A"
+        header_info = f"<div><b>当前价格：</b><span style='color: {border_color}; font-size: 1.2em; font-weight: bold;'>{cp_str}</span></div><div><b>数据源：</b>{data_source}</div><div><b>费率：</b>{fr_str}（拥挤度{fp_str}）</div>"
 
     stage_title, stage_desc = generate_market_stage(r)
     if not is_triggered:
@@ -280,7 +271,6 @@ def build_symbol_block(r):
             if not sr_obj: continue
             html += f"<div style='margin-top:15px; padding-left:10px; border-left:4px solid #8e44ad; background:#fafafa; padding:10px; border-radius:0 5px 5px 0;'>"
             html += f"<p style='margin-top:0; font-weight:bold; color:#8e44ad;'>策略推演：{sname}</p>"
-            # 现货模式下轨道2的名称自动切换
             track2_name = "🟢 现货逃顶预警" if is_spot_mode else "🔪 见顶做空"
             for tk, tn in [("track_1","🚀 底部突破做多"),("track_2",track2_name),("track_3","🩸 暴跌反弹做多")]:
                 ta = sr_obj.get(tk, {})
@@ -302,7 +292,6 @@ def build_symbol_block(r):
     html += "</div>"
     return html
 
-# ================= 顶部导航面板 =================
 def build_dashboard(results, triggered_list, untriggered_list):
     triggered_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
     untriggered_syms = [r['symbol'].replace('_USDT','') for r in untriggered_list if r.get("status") == "ok"]
@@ -323,7 +312,6 @@ def build_dashboard(results, triggered_list, untriggered_list):
     html += "</div>"
     return html
 
-# ================= 🚀 极其丰富的动态标题池 =================
 def generate_dynamic_subject(triggered_list, untriggered_list, results):
     tr_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
     all_directions = []
@@ -365,12 +353,11 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results):
             return random.choice([f"🎈【参谋长预警】极度贪婪！RSI飙至{max_rsi:.0f}，主力随时准备一锅端！", f"🔪【参谋长推演】散户狂欢倒计时？参谋长已经悄悄架好空单！", f"🚨【牛来参谋长】RSI严重超买，这波追高的人，马上要吃苦头了！"])
         elif min_rsi <= 35:
             return random.choice([f"🩸【参谋长推演】极度恐慌！RSI砸至{min_rsi:.0f}，黄金坑正在悄悄形成？", f"💎【参谋长推演】带血的筹码满地都是，主力暗中吸筹，你慌了吗？", f"🐮【牛来参谋长】别人恐惧我贪婪，{min_rsi:.0f}的RSI，反弹还会远吗？"])
-        elif max_fp >= 0.8:
+        elif max_fp >= 0.5:
             return random.choice([f"💥【参谋长推演】资金费率极度拥挤，多头太嗨了，瀑布随时降临！", f"⚠️【参谋长预警】费率爆表！主力准备收割韭菜，空头子弹已上膛！", f"🌪️【牛来参谋长】多头拥挤度{max_fp:.0%}，这是主力最爱的猎杀时刻！"])
         else:
             return random.choice([f"🔮【参谋长推演】主力正在密谋大动作？多空博弈白热化，散户请警惕！", f"🐮【参谋长推演】盘面暗流涌动，参谋长锁定猎物，等一个开枪信号！", f"🛡️【参谋长推演】没有感情的赚钱机器正在盯盘，主力意图已经暴露..."])
 
-# ================= 主入口：生成完整邮件 =================
 def build_report(results, active_strategies, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
 
@@ -406,7 +393,6 @@ def build_report(results, active_strategies, watchlist):
     html += "</div></body></html>"
     return subject, html
 
-# ================= 辅助模块：暂不支持标的 =================
 def build_unsupported_section(results):
     unsupported = [r for r in results if r.get("status") == "unsupported"]
     if not unsupported: return ""
@@ -415,7 +401,6 @@ def build_unsupported_section(results):
     html += "</ul>"
     return html
 
-# ================= 辅助模块：指标词典 =================
 def build_glossary_section():
     html = "<hr><h3 style='color:#34495e; border-left:5px solid #34495e; padding-left:10px;'>📖 参谋长指标词典</h3>"
     html += "<div style='background:#f8f9fa; padding:15px; border-radius:8px; font-size:14px; color:#555;'>"
@@ -423,7 +408,6 @@ def build_glossary_section():
     html += "</div>"
     return html
 
-# ================= 辅助模块：风险声明 =================
 def build_risk_warning():
     return """
 <div style="background: linear-gradient(135deg, #1a1a1a 0%, #2d1b1b 100%); color: #e0e0e0; padding: 25px; border-radius: 12px; margin-top: 25px; border: 1px solid #4a2c2c; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
