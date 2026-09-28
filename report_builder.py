@@ -109,72 +109,100 @@ def render_multi_tf_panel(md):
     ema50_4h = md.get("ema50_4h")
     price = md.get("current_price")
     rsi_div = md.get("rsi_div_1h")
+    rsi_30m = md.get("rsi")
+    ma10_30m = md.get("ma10")
+    adx_30m = md.get("adx")
+
+    # 先算好所有字符串，避免 f-string 嵌套反斜杠
+    rsi_1d_str = f"{rsi_1d:.1f}" if rsi_1d is not None else "N/A"
+    rsi_4h_str = f"{rsi_4h:.1f}" if rsi_4h is not None else "N/A"
+    rsi_1h_str = f"{rsi_1h:.1f}" if rsi_1h is not None else "N/A"
+    rsi_30m_str = f"{rsi_30m:.1f}" if rsi_30m is not None else "N/A"
+
+    day_signal = "N/A"
+    if ema50_1d:
+        pos = "上方" if (price and price > ema50_1d) else "下方"
+        day_signal = f"EMA50={ema50_1d:.4f} | 价格{pos}"
+
+    h4_signal_list = []
+    if ema20_4h:
+        h4_signal_list.append(f"EMA20={ema20_4h:.4f}")
+    if ema50_4h:
+        h4_signal_list.append(f"EMA50={ema50_4h:.4f}")
+    if macd_4h.get("hist") is not None:
+        hist_pos = "正" if macd_4h["hist"] > 0 else "负"
+        h4_signal_list.append(f"MACD柱={hist_pos}")
+    h4_signal = " | ".join(h4_signal_list) if h4_signal_list else "N/A"
+
+    h1_signal_list = []
+    if boll_1h.get("mid"):
+        h1_signal_list.append(f"BOLL中轨={boll_1h['mid']:.4f}")
+    if kdj_1h.get("j") is not None:
+        h1_signal_list.append(f"KDJ J={kdj_1h['j']:.1f}")
+    if rsi_div:
+        h1_signal_list.append(f"RSI背离={rsi_div}")
+    h1_signal = " | ".join(h1_signal_list) if h1_signal_list else "N/A"
+
+    m30_signal_list = []
+    if ma10_30m:
+        m30_signal_list.append(f"MA10={ma10_30m:.4f}")
+    if adx_30m is not None:
+        m30_signal_list.append(f"ADX={adx_30m:.1f}")
+    m30_signal = " | ".join(m30_signal_list) if m30_signal_list else "N/A"
 
     html = "<div style='background:#f8f9fa; padding:15px; border-radius:8px; margin-top:15px; border:1px solid #eee;'>"
     html += "<h4 style='margin:0 0 12px 0; color:#2c3e50;'>🌐 多周期共振面板</h4>"
     html += "<table style='width:100%; font-size:13px; border-collapse:collapse;'>"
     html += "<tr style='background:#e8e8e8;'><th style='padding:6px; text-align:left;'>周期</th><th style='padding:6px;'>趋势</th><th style='padding:6px;'>RSI</th><th style='padding:6px;'>关键位/信号</th></tr>"
 
-    # 1D
-    day_signal = "N/A"
-    if ema50_1d:
-        day_signal = f"EMA50={ema50_1d:.4f} | 价格{'上方' if price and price > ema50_1d else '下方'}"
-    html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>📅 日线</td>"
+    html += "<tr style='border-bottom:1px solid #eee;'>"
+    html += "<td style='padding:6px; font-weight:bold;'>📅 日线</td>"
     html += f"<td style='text-align:center;'>{translate_trend(trend_1d)}</td>"
-    html += f"<td style='text-align:center;'>{f'{rsi_1d:.1f}' if rsi_1d else 'N/A'}</td>"
+    html += f"<td style='text-align:center;'>{rsi_1d_str}</td>"
     html += f"<td style='text-align:center; font-size:12px;'>{day_signal}</td></tr>"
 
-    # 4H
-    h4_signal = []
-    if ema20_4h and ema50_4h:
-        h4_signal.append(f"EMA20={ema20_4h:.4f}")
-        h4_signal.append(f"EMA50={ema50_4h:.4f}")
-    if macd_4h.get("hist") is not None:
-        h4_signal.append(f"MACD柱={'正' if macd_4h['hist']>0 else '负'}")
-    html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>⏰ 4小时</td>"
+    html += "<tr style='border-bottom:1px solid #eee;'>"
+    html += "<td style='padding:6px; font-weight:bold;'>⏰ 4小时</td>"
     html += f"<td style='text-align:center;'>{translate_trend(trend_4h)}</td>"
-    html += f"<td style='text-align:center;'>{f'{rsi_4h:.1f}' if rsi_4h else 'N/A'}</td>"
-    html += f"<td style='text-align:center; font-size:12px;'>{' | '.join(h4_signal) if h4_signal else 'N/A'}</td></tr>"
+    html += f"<td style='text-align:center;'>{rsi_4h_str}</td>"
+    html += f"<td style='text-align:center; font-size:12px;'>{h4_signal}</td></tr>"
 
-    # 1H
-    h1_signal = []
-    if boll_1h.get("mid"):
-        h1_signal.append(f"BOLL中轨={boll_1h['mid']:.4f}")
-    if kdj_1h.get("j") is not None:
-        h1_signal.append(f"KDJ J={kdj_1h['j']:.1f}")
-    if rsi_div:
-        h1_signal.append(f"RSI背离={rsi_div}")
-    html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>🕐 1小时</td>"
-    html += f"<td style='text-align:center;'>-</td>"
-    html += f"<td style='text-align:center;'>{f'{rsi_1h:.1f}' if rsi_1h else 'N/A'}</td>"
-    html += f"<td style='text-align:center; font-size:12px;'>{' | '.join(h1_signal) if h1_signal else 'N/A'}</td></tr>"
+    html += "<tr style='border-bottom:1px solid #eee;'>"
+    html += "<td style='padding:6px; font-weight:bold;'>🕐 1小时</td>"
+    html += "<td style='text-align:center;'>-</td>"
+    html += f"<td style='text-align:center;'>{rsi_1h_str}</td>"
+    html += f"<td style='text-align:center; font-size:12px;'>{h1_signal}</td></tr>"
 
-    # 30m
-    m30_signal = []
-    m30_ma10 = md.get("ma10")
-    m30_adx = md.get("adx")
-    if m30_ma10:
-        m30_signal.append(f"MA10={m30_ma10:.4f}")
-    if m30_adx is not None:
-        m30_signal.append(f"ADX={m30_adx:.1f}")
-    html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>⏱️ 30分钟</td>"
-    html += f"<td style='text-align:center;'>-</td>"
-    html += f"<td style='text-align:center;'>{f'{md.get(\"rsi\"):.1f}' if md.get('rsi') else 'N/A'}</td>"
-    html += f"<td style='text-align:center; font-size:12px;'>{' | '.join(m30_signal) if m30_signal else 'N/A'}</td></tr>"
+    html += "<tr style='border-bottom:1px solid #eee;'>"
+    html += "<td style='padding:6px; font-weight:bold;'>⏱️ 30分钟</td>"
+    html += "<td style='text-align:center;'>-</td>"
+    html += f"<td style='text-align:center;'>{rsi_30m_str}</td>"
+    html += f"<td style='text-align:center; font-size:12px;'>{m30_signal}</td></tr>"
     html += "</table>"
 
     # 综合做单提示
-    html += "<div style='margin-top:12px; padding:10px; background:#fff; border-left:4px solid #3498db; border-radius:0 5px 5px 0;'>"
-    html += "<p style='margin:0; font-size:13px; color:#2c3e50;'><b>💡 参谋长多周期提示：</b>"
     tips = []
-    if trend_1d == "up": tips.append("日线多头，回调是机会")
-    elif trend_1d == "down": tips.append("日线空头，反弹是陷阱")
-    else: tips.append("日线震荡，区间操作")
-    if trend_4h == "up" and trend_1d == "up": tips.append("4H共振多头，优先做多")
-    elif trend_4h == "down" and trend_1d == "down": tips.append("4H共振空头，优先做空")
-    if rsi_1h and rsi_1h < 35: tips.append("1H超卖，等止跌")
-    elif rsi_1h and rsi_1h > 70: tips.append("1H超买，等回落")
-    html += "；".join(tips) + "。</p></div>"
+    if trend_1d == "up":
+        tips.append("日线多头，回调是机会")
+    elif trend_1d == "down":
+        tips.append("日线空头，反弹是陷阱")
+    else:
+        tips.append("日线震荡，区间操作")
+
+    if trend_4h == "up" and trend_1d == "up":
+        tips.append("4H共振多头，优先做多")
+    elif trend_4h == "down" and trend_1d == "down":
+        tips.append("4H共振空头，优先做空")
+
+    if rsi_1h is not None and rsi_1h < 35:
+        tips.append("1H超卖，等止跌")
+    elif rsi_1h is not None and rsi_1h > 70:
+        tips.append("1H超买，等回落")
+
+    tips_str = "；".join(tips)
+    html += "<div style='margin-top:12px; padding:10px; background:#fff; border-left:4px solid #3498db; border-radius:0 5px 5px 0;'>"
+    html += f"<p style='margin:0; font-size:13px; color:#2c3e50;'><b>💡 参谋长多周期提示：</b>{tips_str}。</p>"
+    html += "</div>"
     html += "</div>"
     return html
 
@@ -193,11 +221,11 @@ def generate_market_stage(r):
 
     if trend_1d == "up" and trend_4h == "up":
         if ma10 and cp < ma10 and cp > rl * 1.05:
-            return "🔥 多头回踩期", f"1D+4H双多头共振，价格回踩至生命线下方。这是经典的'趋势回踩'黄金坑，等30m止跌即可入场。"
+            return "🔥 多头回踩期", "1D+4H双多头共振，价格回踩至生命线下方。这是经典的'趋势回踩'黄金坑，等30m止跌即可入场。"
         else:
-            return "🚀 多头趋势期", f"1D+4H双多头共振，趋势健康。回调即买入机会，坚决不做空。"
+            return "🚀 多头趋势期", "1D+4H双多头共振，趋势健康。回调即买入机会，坚决不做空。"
     elif trend_1d == "down" and trend_4h == "down":
-        return "🔪 空头趋势期", f"1D+4H双空头共振，反弹即做空机会。绝对不要抄底，等暴跌后RSI超卖再考虑反弹。"
+        return "🔪 空头趋势期", "1D+4H双空头共振，反弹即做空机会。绝对不要抄底，等暴跌后RSI超卖再考虑反弹。"
     elif cp <= rl * 1.03:
         return "🟢 潜伏期（底部区域）", "价格在主力洗盘底线附近摩擦，等放量突破。"
     elif ma10 and cp < ma10:
@@ -224,6 +252,7 @@ def generate_commander_comment(r, is_triggered):
     adx_str = f"{adx:.1f}" if adx is not None else "N/A"
     fp_str = f"{fp:.1%}" if fp is not None else "N/A"
     fr_str = f"{fr:.4f}%" if fr is not None else "N/A"
+    rsi_1h_str = f"{rsi_1h:.1f}" if rsi_1h is not None else "N/A"
 
     best_sr, max_score = None, -1
     for sname, sr in sr_list.items():
@@ -246,7 +275,7 @@ def generate_commander_comment(r, is_triggered):
         elif direction == "long_pullback":
             comment = f"黄金坑！{r['symbol']} 1D+4H双多头共振，价格回踩至1H布林中轨附近。这种趋势中的回踩是难得的加仓机会，缩量止跌就是入场信号！"
         elif direction == "long_rebound":
-            comment = f"绝地反击！{r['symbol']} RSI砸到{rsi_str}，1H RSI={rsi_1h if rsi_1h else 'N/A'}，CVD底背离暴露了主力吸筹阴谋。带血的筹码，参谋长笑纳了！"
+            comment = f"绝地反击！{r['symbol']} RSI砸到{rsi_str}，1H RSI={rsi_1h_str}，CVD底背离暴露了主力吸筹阴谋。带血的筹码，参谋长笑纳了！"
         elif direction == "long_trend":
             comment = f"{r['symbol']} 蓄力完毕，主力点火起飞！双周期共振多头，动能温和。这波趋势我们要吃满！"
         return f"<div style='background:#fff3cd; padding:12px; border-left:5px solid #e74c3c; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#c0392b; font-weight:bold;'>{comment}</span></div>"
@@ -375,7 +404,7 @@ def build_symbol_block(r):
         </div>
     """
 
-    # 🚀 多周期面板
+    # 多周期面板
     html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md)}</div>"
 
     if is_triggered:
@@ -481,7 +510,7 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results):
                 f"💥【参谋长战报】大行情来了！{', '.join(tr_syms[:3])}齐爆，跟紧不迷路！"
             ])
         elif is_short and is_long:
-            return f"🚨【参谋长战报】多空双杀！主力露出獠牙！"
+            return "🚨【参谋长战报】多空双杀！主力露出獠牙！"
         elif is_short:
             if has_tf:
                 return random.choice([
