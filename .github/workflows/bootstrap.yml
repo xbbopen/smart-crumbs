@@ -3,9 +3,6 @@ name: 历史数据初始化
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
@@ -15,6 +12,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # 尝试恢复已有 DB（如果有，会跳过已拉取的标的）
+      - name: 恢复数据库
+        uses: actions/cache@v4
+        with:
+          path: data/market.db
+          key: market-db-${{ github.run_id }}
+          restore-keys: |
+            market-db-
 
       - run: pip install -r requirements.txt
 
@@ -35,10 +41,15 @@ jobs:
           print(f'压缩后: {db_size_mb():.2f} MB')
           "
 
-      - name: 提交数据库
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/market.db
-          git diff --staged --quiet || git commit -m "🤖 初始化历史行情数据 [skip ci]"
-          git push
+      - name: 保存数据库到 Cache
+        uses: actions/cache@v4
+        with:
+          path: data/market.db
+          key: market-db-${{ github.run_id }}
+
+      - name: 上传数据库备份
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-db-backup
+          path: data/market.db
+          retention-days: 30
