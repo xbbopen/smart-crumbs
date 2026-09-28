@@ -29,11 +29,13 @@ def main():
     for item in watchlist:
         sym, typ = item["symbol"], item.get("type", "futures")
         log.info(f"处理 {sym} ({typ})")
-        md = build_market_data(sym, typ)
+        
+        # 🚀 修复点：build_market_data 现在返回 (md, status) 元组
+        md, status = build_market_data(sym, typ)
         time.sleep(1.5) # 防限流
         
-        if md["fetch_status"] != "ok":
-            all_results.append({"symbol": sym, "asset_type": typ, "status": md["fetch_status"], "strategy_results": {}})
+        if status != "ok":
+            all_results.append({"symbol": sym, "asset_type": typ, "status": status, "strategy_results": {}})
             continue
             
         srs = {}
@@ -51,7 +53,7 @@ def main():
             "strategy_results": srs
         })
 
-    # 🚀 核心逻辑：判断是否有任何标的触发信号
+    # 判断是否有任何标的触发信号
     any_triggered = any(sr and sr.get("triggered") for r in all_results for sr in r.get("strategy_results", {}).values())
     
     if any_triggered or notify:
@@ -60,7 +62,7 @@ def main():
     else:
         log.info("无信号且 notify_on_no_signal=False，静默退出")
 
-    # 记录信号日志（本次新增：记录 entry_price 和 direction）
+    # 记录信号日志
     write_signal_log(all_results)
 
 # ================= 信号日志记录 =================
