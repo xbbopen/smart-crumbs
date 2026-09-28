@@ -1,45 +1,59 @@
 name: 历史回测
+
 on:
   workflow_dispatch:
     inputs:
       strategies:
-        description: '策略名列表（空格分隔）'
+        description: '策略名（空格分隔，如：v1_default）'
         required: false
+        default: 'v1_default'
       symbols:
-        description: '标的列表（空格分隔，如 BTC NEAR）'
+        description: '标的（空格分隔，如：BTC ETH SOL）'
         required: false
-      interval:
-        description: 'K线周期（30m/1h/4h）'
-        required: false
-        default: '30m'
+        default: 'BTC ETH SOL'
       start_date:
-        description: '开始日期 YYYY-MM-DD'
+        description: '开始日期 YYYY-MM-DD（留空则从头回测）'
         required: false
+        default: ''
       end_date:
-        description: '结束日期 YYYY-MM-DD'
+        description: '结束日期 YYYY-MM-DD（留空则到最新）'
         required: false
-      limit:
-        description: 'K线数量（指定日期区间则忽略）'
+        default: ''
+      asset_type:
+        description: '标的类型：futures 或 spot'
         required: false
-        default: '1000'
+        default: 'futures'
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # 🚀 从 Cache 恢复数据库（回测需要读取历史K线）
+      - name: 恢复数据库
+        uses: actions/cache@v4
+        with:
+          path: data/market.db
+          key: market-db-${{ github.run_id }}
+          restore-keys: |
+            market-db-
+
       - run: pip install -r requirements.txt
-      - run: python backtest.py
+
+      - name: 运行回测
+        run: |
+          python backtest.py \
+            --strategies ${{ github.event.inputs.strategies }} \
+            --symbols ${{ github.event.inputs.symbols }} \
+            --start_date "${{ github.event.inputs.start_date }}" \
+            --end_date "${{ github.event.inputs.end_date }}" \
+            --asset_type ${{ github.event.inputs.asset_type }}
         env:
-          BT_STRATEGIES: ${{ github.event.inputs.strategies }}
-          BT_SYMBOLS: ${{ github.event.inputs.symbols }}
-          BT_INTERVAL: ${{ github.event.inputs.interval }}
-          BT_START_DATE: ${{ github.event.inputs.start_date }}
-          BT_END_DATE: ${{ github.event.inputs.end_date }}
-          BT_LIMIT: ${{ github.event.inputs.limit }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
