@@ -1,0 +1,38 @@
+name: 历史数据初始化
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '回溯天数'
+        required: false
+        default: '365'
+      intervals:
+        description: '周期（空格分隔）'
+        required: false
+        default: '30m 4h'
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: 运行 bootstrap
+        run: |
+          python data_bootstrap.py --from-config \
+            --days ${{ github.event.inputs.days }} \
+            --intervals ${{ github.event.inputs.intervals }}
+      - name: 提交数据库
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/market.db
+          git diff --staged --quiet || git commit -m "🤖 初始化历史行情数据 [skip ci]"
+          git push
