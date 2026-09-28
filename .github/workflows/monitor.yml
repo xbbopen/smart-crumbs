@@ -1,8 +1,17 @@
 name: 多标的的合约监控
+
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: market-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -12,10 +21,18 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - run: python monitor.py
+      - name: 运行监控
+        run: python monitor.py
         env:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+      - name: 提交更新的数据库
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/market.db
+          git diff --staged --quiet || git commit -m "🤖 更新行情数据库 [skip ci]"
+          git push || echo "推送失败"
