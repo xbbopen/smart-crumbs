@@ -264,8 +264,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     """
     DB优先的K线获取，带源切换保护。
     返回：(klines, source_info)
-    source_info = {"primary": "hyperliquid", "actual": "binance_spot",
-                   "mixed": True/False, "primary_count": 123}
     """
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
@@ -280,54 +278,47 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     else:
         fetch_start = now_ms - (desired_bars * interval_ms)
 
-    # 3. 拉增量
+    # 3. 拉增量（瀑布式降级：主源 → 币安 → Gate，无条件依次尝试）
     actual_source = primary_source
     if fetch_start < now_ms:
         klines_new = []
+
+        # 第一层：主源
         if primary_source == "hyperliquid":
             klines_new, _ = fetch_hyperliquid_klines(symbol, interval, 5000, fetch_start, now_ms)
-            if not klines_new:
-                klines_new, _ = fetch_binance_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-                actual_source = "binance_spot"
-                if not klines_new:
-                    klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-                    actual_source = "gate_spot"
-        else:
+            if klines_new:
+                actual_source = "hyperliquid"
+
+        # 第二层：币安现货（无条件尝试，只要上一层失败）
+        if not klines_new:
             klines_new, _ = fetch_binance_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-            if not klines_new:
-                klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
+            if klines_new:
+                actual_source = "binance_spot"
+
+        # 第三层：Gate现货（无条件尝试，只要上面都失败）
+        if not klines_new:
+            klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
+            if klines_new:
                 actual_source = "gate_spot"
 
         if klines_new:
             upsert_klines(symbol, interval, klines_new, source=actual_source)
 
-    # 4. 🚀 源切换保护：优先只读主源
-    klines_primary = load_klines(symbol, interval, desired_bars, source=primary_source)
+    # 4. 🚀 关键修复：不再按 source 过滤，直接读全部数据
+    # 因为 source 字段只用于审计，指标计算不需要区分
+    klines_all = load_klines(symbol, interval, desired_bars, source=None)
 
-    if len(klines_primary) >= desired_bars:
-        # 主源数据充足，只读主源，不混合
-        return klines_primary, {
+    if len(klines_all) >= desired_bars:
+        # 数据充足，返回。同时告知调用方当前主源和实际源是否一致
+        return klines_all, {
             "primary": primary_source,
             "actual": actual_source,
-            "mixed": False,
-            "primary_count": len(klines_primary),
+            "mixed": primary_source != actual_source,
+            "primary_count": len(klines_all),
         }
 
-    # 5. 主源不足，混合读取（并标记）
-    klines_mixed = load_klines(symbol, interval, desired_bars, source=None)
-
-    if len(klines_mixed) >= 50:
-        log.warning(f"[{symbol}][{interval}] 主源{primary_source}数据不足({len(klines_primary)}根)，"
-                    f"混合读取({len(klines_mixed)}根)")
-        return klines_mixed, {
-            "primary": primary_source,
-            "actual": actual_source,
-            "mixed": True,
-            "primary_count": len(klines_primary),
-        }
-
-    # 6. DB数据完全不足，走API兜底
-    log.warning(f"[{symbol}][{interval}] DB数据完全不足({len(klines_mixed)}根)，从API全量拉")
+    # 5. DB数据不足，走API兜底
+    log.warning(f"[{symbol}][{interval}] DB数据不足({len(klines_all)}根)，从API全量拉")
     fallback_klines = None
     if primary_source == "hyperliquid":
         fallback_klines, _ = fetch_hyperliquid_klines(symbol, interval, desired_bars)
