@@ -1,7 +1,7 @@
 import json, time, logging, sys, os
 from datetime import datetime, timezone, timedelta
 from strategies.loader import load_strategy
-from data_fetcher import build_market_data
+from data_fetcher import build_market_data, audit_watchlist
 from report_builder import build_report
 from email_sender import send_html_email
 
@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 BJT = timezone(timedelta(hours=8))
 
-# ================= 主流程 =================
+
 def main():
     with open("config/config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -18,26 +18,43 @@ def main():
     active_strategies = config.get("active_strategies", ["v1_default"])
     notify = config.get("notify_on_no_signal", True)
 
+    log.info("=" * 60)
+    log.info(f"📊 参谋长监控系统启动 | 共 {len(watchlist)} 个标的")
+    log.info("=" * 60)
+
+    # ============ 第一步：Hyperliquid 合约审计 ============
+    log.info("🔍 正在对照 Hyperliquid 全币种，审计监控列表...")
+    has_contract, no_contract = audit_watchlist(watchlist)
+
+    log.info("-" * 60)
+    log.info(f"✅ 有 Hyperliquid 合约 ({len(has_contract)}个): {', '.join(has_contract)}")
+    if no_contract:
+        log.info(f"⚠️  无 Hyperliquid 合约 ({len(no_contract)}个): {', '.join(no_contract)}")
+        log.info(f"   ↳ 这些标的将直接走现货降级分析")
+    log.info("-" * 60)
+
+    # ============ 第二步：策略加载 ============
     strategies = {}
     for name in active_strategies:
         try:
             strategies[name] = load_strategy(name)
+            log.info(f"✅ 策略加载成功: {name}")
         except Exception as e:
-            log.error(f"加载策略失败 {name}: {e}")
+            log.error(f"❌ 加载策略失败 {name}: {e}")
 
+    # ============ 第三步：逐个标的获取数据 ============
     all_results = []
-    for item in watchlist:
+    for idx, item in enumerate(watchlist, 1):
         sym, typ = item["symbol"], item.get("type", "futures")
-        log.info(f"处理 {sym} ({typ})")
-        
-        # 🚀 修复点：build_market_data 现在返回 (md, status) 元组
+        log.info(f"\n[{idx}/{len(watchlist)}] 处理 {sym} ({typ})")
+
         md, status = build_market_data(sym, typ)
-        time.sleep(1.5) # 防限流
-        
+        time.sleep(1.0)
+
         if status != "ok":
             all_results.append({"symbol": sym, "asset_type": typ, "status": status, "strategy_results": {}})
             continue
-            
+
         srs = {}
         for name, strat in strategies.items():
             try:
@@ -45,7 +62,7 @@ def main():
             except Exception as e:
                 log.error(f"策略 {name} 评估 {sym} 异常: {e}")
                 srs[name] = None
-                
+
         all_results.append({
             "symbol": sym, "asset_type": typ, "status": "ok",
             "current_price": md.get("current_price"),
@@ -53,19 +70,28 @@ def main():
             "strategy_results": srs
         })
 
-    # 判断是否有任何标的触发信号
+    # ============ 第四步：发送邮件 ============
     any_triggered = any(sr and sr.get("triggered") for r in all_results for sr in r.get("strategy_results", {}).values())
-    
+
     if any_triggered or notify:
         subject, html = build_report(all_results, active_strategies, watchlist)
         send_html_email(subject, html)
     else:
         log.info("无信号且 notify_on_no_signal=False，静默退出")
 
-    # 记录信号日志
     write_signal_log(all_results)
 
-# ================= 信号日志记录 =================
+    # ============ 第五步：汇总输出 ============
+    log.info("\n" + "=" * 60)
+    log.info("📊 本次运行汇总")
+    log.info("=" * 60)
+    ok_count = sum(1 for r in all_results if r["status"] == "ok")
+    triggered_count = sum(1 for r in all_results if any(sr and sr.get("triggered") for sr in r.get("strategy_results", {}).values()))
+    log.info(f"✅ 成功获取: {ok_count}/{len(all_results)}")
+    log.info(f"🚨 触发信号: {triggered_count}")
+    log.info("=" * 60)
+
+
 def write_signal_log(results):
     os.makedirs("logs", exist_ok=True)
     date_str = datetime.now(BJT).strftime("%Y%m%d")
@@ -83,6 +109,7 @@ def write_signal_log(results):
                         "reason": sr.get("reason", "")
                     }
                     f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
 
 if __name__ == "__main__":
     main()
