@@ -3,7 +3,5 @@ __pycache__/
 .env
 logs/
 *.log
-data/*.db-wal
-data/*.db-shm
-!data/market.db
-!data/
+data/
+!data/.gitkeep
