@@ -1,18 +1,87 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timezone, timedelta
+import os
+import json
 import random
+
+from report_lexicon import (
+    TREND_MAP, MOMENTUM_4H_MAP, RSI_DIV_MAP, REGIME_MAP,
+    SUB_TYPE_MAP, DATA_MODE_MAP, TRACK_NAME_MAP, SESSION_MAP,
+    SUBJECT_POOL, COMMENT_POOL, HOTSPOT_POOL,
+    fill, pick_unique, pick_one,
+)
 
 BJT = timezone(timedelta(hours=8))
 
+HISTORY_FILE = "logs/subject_history.json"
+HISTORY_SIZE = 20
 
+
+# ============================================================
+# 一、翻译工具
+# ============================================================
 def translate_asset_type(asset_type):
-    return {"futures": "合约", "spot": "现货"}.get(asset_type, asset_type)
+    return DATA_MODE_MAP.get(asset_type, asset_type or "未知")
 
 
 def translate_trend(t):
-    return {"up": "🟢 多头", "down": "🔴 空头", "neutral": "⚪ 震荡", None: "❓ 未知"}.get(t, "❓ 未知")
+    return TREND_MAP.get(t, "❓ 未知")
 
 
+def _fmt_num(v, fmt=".1f", default="N/A"):
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        if f != f:  # NaN
+            return default
+        return format(f, fmt)
+    except (TypeError, ValueError):
+        return default
+
+
+# ============================================================
+# 二、标题去重
+# ============================================================
+def _load_subject_history():
+    try:
+        if not os.path.exists(HISTORY_FILE):
+            return []
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_subject_history(history):
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history[-HISTORY_SIZE:], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _pick_unique_subject(pool):
+    """从标题池里随机抽取，尽量不与历史重复。最多重试 8 次。"""
+    history = _load_subject_history()
+    for _ in range(8):
+        candidate = random.choice(pool)
+        if candidate not in history:
+            history.append(candidate)
+            _save_subject_history(history)
+            return candidate
+    # 兜底：允许重复
+    candidate = random.choice(pool)
+    history.append(candidate)
+    _save_subject_history(history)
+    return candidate
+
+
+# ============================================================
+# 三、常量
+# ============================================================
 CONDITION_EXPLANATIONS = {
     "硬条件": "该轨道能否开单的前置门槛",
     "1.底部区域": "价格是否跌到了主力近期洗盘的底线",
@@ -68,28 +137,10 @@ AD_BANNER = """
 """
 
 
-def get_leverage_advice(oi):
-    if oi is None: return "数据受限，建议3x以下轻仓试错。"
-    if oi > 500_000_000: return "【资金极度充裕】建议杠杆20x-50x（快进快出）。"
-    if oi > 50_000_000: return "【流动性极佳】建议杠杆10x-20x。"
-    if oi > 5_000_000: return "【中等流动性】建议杠杆5x-10x。"
-    return "【流动性差】建议杠杆2x-3x（极易被插针，保命要紧）。"
-
-
-# ================= 多周期面板渲染 =================
+# ============================================================
+# 四、多周期面板
+# ============================================================
 def render_multi_tf_panel(md):
-    def _fmt(v, fmt=".1f"):
-        """安全格式化：None / NaN / 非数字 → N/A"""
-        if v is None:
-            return "N/A"
-        try:
-            f = float(v)
-            if f != f:  # NaN
-                return "N/A"
-            return format(f, fmt)
-        except (TypeError, ValueError):
-            return "N/A"
-
     trend_1d = md.get("trend_1d")
     trend_4h = md.get("trend_4h")
     rsi_1h = md.get("rsi_1h")
@@ -107,10 +158,10 @@ def render_multi_tf_panel(md):
     ma10_30m = md.get("ma10")
     adx_30m = md.get("adx")
 
-    rsi_1d_str = _fmt(rsi_1d)
-    rsi_4h_str = _fmt(rsi_4h)
-    rsi_1h_str = _fmt(rsi_1h)
-    rsi_30m_str = _fmt(rsi_30m)
+    rsi_1d_str = _fmt_num(rsi_1d)
+    rsi_4h_str = _fmt_num(rsi_4h)
+    rsi_1h_str = _fmt_num(rsi_1h)
+    rsi_30m_str = _fmt_num(rsi_30m)
 
     h1_trend = "neutral"
     if price and boll_1h.get("mid"):
@@ -137,7 +188,7 @@ def render_multi_tf_panel(md):
     h1_signal_list = []
     if boll_1h.get("mid"): h1_signal_list.append(f"BOLL中轨={boll_1h['mid']:.4f}")
     if kdj_1h.get("j") is not None: h1_signal_list.append(f"KDJ J={kdj_1h['j']:.1f}")
-    if rsi_div: h1_signal_list.append(f"RSI背离={rsi_div}")
+    if rsi_div: h1_signal_list.append(f"RSI背离={RSI_DIV_MAP.get(rsi_div, rsi_div)}")
     h1_signal = " | ".join(h1_signal_list) if h1_signal_list else "N/A"
 
     m30_signal_list = []
@@ -171,7 +222,9 @@ def render_multi_tf_panel(md):
     return html
 
 
-# ================= 行情阶段推演器 =================
+# ============================================================
+# 五、行情阶段推演
+# ============================================================
 def generate_market_stage(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
@@ -204,23 +257,37 @@ def generate_market_stage(r):
         return "推演异常", f"阶段推演出错：{type(e).__name__}: {e}"
 
 
-# ================= 参谋长解读 =================
+# ============================================================
+# 六、参谋长解读（话术池 + 数据锚点）
+# ============================================================
 def generate_commander_comment(r, is_triggered):
     md = r.get("market_data", {})
     sr_list = r.get("strategy_results", {})
+
+    # ---- 提取数据锚点 ----
+    sym_raw = r.get("symbol", "")
+    sym = sym_raw.replace("_USDT", "")
+    cp = r.get("current_price")
     rsi = md.get("rsi")
-    adx = md.get("adx")
-    fp = md.get("funding_percentile")
-    fr = md.get("funding_rate")
-    is_spot_mode = md.get("data_mode") == "spot"
     rsi_1h = md.get("rsi_1h")
+    adx = md.get("adx")
+    fr = md.get("funding_rate")
+    fp = md.get("funding_percentile")
+    rh = md.get("recent_high")
+    rl = md.get("recent_low")
+    ma10 = md.get("ma10")
+    kdj_1h = md.get("kdj_1h") or {}
+    kdj_j = kdj_1h.get("j")
+    boll_1h = md.get("boll_1h") or {}
+    mid = boll_1h.get("mid")
+    is_spot_mode = md.get("data_mode") == "spot"
 
-    rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
-    adx_str = f"{adx:.1f}" if adx is not None else "N/A"
-    fp_str = f"{fp:.1%}" if fp is not None else "N/A"
-    fr_str = f"{fr:.4f}%" if fr is not None else "N/A"
-    rsi_1h_str = f"{rsi_1h:.1f}" if rsi_1h is not None else "N/A"
+    # 回撤百分比
+    drawdown = 0.0
+    if cp and rh and rh > 0:
+        drawdown = (rh - cp) / rh * 100
 
+    # ---- 找到"最佳策略结果" ----
     best_sr, max_score = None, -1
     for sname, sr in sr_list.items():
         if sr:
@@ -229,7 +296,7 @@ def generate_commander_comment(r, is_triggered):
                 if s > max_score:
                     max_score, best_sr = s, sr
 
-    # 🚀 修复：策略异常时明确显示，不返回空内容
+    # ---- 策略异常：明确显示，不返回空 ----
     if best_sr and best_sr.get("error"):
         return (
             "<div style='background:#ffebee; padding:12px; border-left:5px solid #d32f2f; "
@@ -237,8 +304,6 @@ def generate_commander_comment(r, is_triggered):
             f"<b>🐮 参谋长解读：</b><span style='color:#c62828; font-weight:bold;'>"
             f"⚠️ 该标的策略执行异常，本轮无法推演。错误：{best_sr['error']}</span></div>"
         )
-
-    # 🚀 修复：所有策略均未返回有效结果（best_sr is None）
     if best_sr is None:
         return (
             "<div style='background:#fff3e0; padding:12px; border-left:5px solid #ef6c00; "
@@ -247,43 +312,67 @@ def generate_commander_comment(r, is_triggered):
             f"该标的未返回任何策略结果，请检查 monitor 日志。</span></div>"
         )
 
-    comment = ""
+    # ---- 组装话术参数 ----
+    fill_kwargs = {
+        "sym": sym,
+        "rsi": _fmt_num(rsi),
+        "rsi_1h": _fmt_num(rsi_1h),
+        "adx": _fmt_num(adx),
+        "fr": _fmt_num(fr, ".4f"),
+        "fp": f"{fp:.1%}" if fp is not None else "N/A",
+        "rh": _fmt_num(rh, ".4f"),
+        "rl": _fmt_num(rl, ".4f"),
+        "ma10": _fmt_num(ma10, ".4f"),
+        "mid": _fmt_num(mid, ".4f"),
+        "kdj_j": _fmt_num(kdj_j),
+        "drawdown": _fmt_num(drawdown, ".1f"),
+    }
+
+    # ---- 选择话术池 ----
+    pool_key = None
     if is_triggered:
         direction = best_sr.get("direction")
         if direction == "short":
             sub_type = best_sr.get("track_2", {}).get("sub_type", "reversal")
-            if sub_type == "trend_follow":
-                comment = f"兄弟们，{r['symbol']} 4H空头结构 + 价格反弹到关键阻力。这种反弹就是给空头送钱的机会，顺势追空，带好2%止损！"
-            else:
-                comment = f"兄弟们，{r['symbol']} 主力磨刀霍霍了！RSI飙到{rsi_str}，费率{fr_str}，多头拥挤度{fp_str}。1D和4H共振向下，这是主力准备'一锅端'的信号！"
+            pool_key = "short_trend" if sub_type == "trend_follow" else "short_reversal"
         elif direction == "spot_warning":
-            comment = f"警报！{r['symbol']} 现货模式出现逃顶信号！RSI={rsi_str}，价格逼近前高。现货不可做空，建议逐步止盈减仓！"
+            pool_key = "spot_warning"
         elif direction == "long_pullback":
-            comment = f"黄金坑！{r['symbol']} 1D+4H双多头共振，价格回踩至1H布林中轨附近。这种趋势中的回踩是难得的加仓机会，缩量止跌就是入场信号！"
+            pool_key = "long_pullback"
         elif direction == "long_rebound":
-            comment = f"绝地反击！{r['symbol']} RSI砸到{rsi_str}，1H RSI={rsi_1h_str}，CVD底背离暴露了主力吸筹阴谋。带血的筹码，参谋长笑纳了！"
+            pool_key = "long_rebound"
         elif direction == "long_trend":
-            comment = f"{r['symbol']} 蓄力完毕，主力点火起飞！双周期共振多头，动能温和。这波趋势我们要吃满！"
-        return f"<div style='background:#fff3cd; padding:12px; border-left:5px solid #e74c3c; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#c0392b; font-weight:bold;'>{comment}</span></div>"
-
-    # 未触发
-    if adx is not None and adx < 20:
-        comment = f"{r['symbol']} 现在ADX只有{adx_str}，主力高度控盘，无序震荡，进去就是送人头。管住手！"
-    elif rsi is not None and rsi >= 70 and not is_spot_mode:
-        comment = f"注意风险！{r['symbol']} 30m RSI={rsi_str}，当前费率{fr_str}。别被FOMO冲昏头脑，等它见顶信号，准备反手做空！"
-    elif rsi is not None and rsi <= 35:
-        comment = f"机会在酝酿！{r['symbol']} RSI={rsi_str}，极度恐慌。子弹已经上膛，等企稳信号！"
+            pool_key = "long_trend"
     else:
-        if max_score >= 3:
-            comment = f"马上要触发了！{r['symbol']} 各项指标都在临界点，主力意图已经暴露，死死盯盘！"
-        elif max_score >= 2:
-            comment = f"{r['symbol']} 盘面暗流涌动，主力小动作藏不住了。耐心等信号。"
+        # 未触发：根据情绪选池
+        if rsi is not None and rsi >= 70 and not is_spot_mode:
+            pool_key = "no_trigger_greedy"
+        elif rsi is not None and rsi <= 35:
+            pool_key = "no_trigger_panic"
         else:
-            comment = f"{r['symbol']} 目前垃圾时间，各项指标不达标。空仓休息，等信号。"
+            pool_key = "no_trigger_quiet"
 
-    return f"<div style='background:#f8f9fa; padding:12px; border-left:5px solid #3498db; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#2c3e50;'>{comment}</span></div>"
+    pool = COMMENT_POOL.get(pool_key) or COMMENT_POOL["no_trigger_quiet"]
+    template = pick_one(pool)
+    comment = fill(template, **fill_kwargs)
+
+    # 若上面填完还是空的，走兜底
+    if not comment:
+        comment = f"{sym} 盘面暂无明确信号，静观其变。"
+
+    bg = "#fff3cd" if is_triggered else "#f8f9fa"
+    border = "#e74c3c" if is_triggered else "#3498db"
+    color = "#c0392b" if is_triggered else "#2c3e50"
+    return (
+        f"<div style='background:{bg}; padding:12px; border-left:5px solid {border}; "
+        f"margin-top:10px; border-radius:5px;'>"
+        f"<b>🐮 参谋长解读：</b><span style='color:{color};'>{comment}</span></div>"
+    )
 
 
+# ============================================================
+# 七、轨道细节渲染
+# ============================================================
 def render_track_details(details, max_score):
     html = ""
     for k, v in details.items():
@@ -302,7 +391,9 @@ def render_track_details(details, max_score):
     return html
 
 
-# ================= 入场计划渲染 =================
+# ============================================================
+# 八、入场计划渲染
+# ============================================================
 def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     if not entry_plan:
         return ""
@@ -376,9 +467,10 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     return html
 
 
-# ================= 🚀 策略异常专用卡片 =================
+# ============================================================
+# 九、错误卡片
+# ============================================================
 def build_error_card(r, err_msg: str):
-    """策略执行异常时的简洁卡片，明确指出问题标的和错误。"""
     sym = r['symbol'].replace('_USDT', '')
     return f"""
     <div style="border: 3px solid #d32f2f; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); overflow: hidden;">
@@ -398,14 +490,82 @@ def build_error_card(r, err_msg: str):
     """
 
 
-# ================= 标的独立卡片 =================
+# ============================================================
+# 十、热点开场段落
+# ============================================================
+def build_hotspot_section(hotspot):
+    if not hotspot:
+        return ""
+    label = hotspot.get("session_label", "")
+    vibe = hotspot.get("session_vibe", "")
+
+    def _fmt_top_gainer(items):
+        return " | ".join(
+            f"<b style='color:#e74c3c;'>{x['sym']} {x['pct']:+.2f}%</b>"
+            for x in items
+        ) or "无"
+
+    def _fmt_top_loser(items):
+        return " | ".join(
+            f"<b style='color:#27ae60;'>{x['sym']} {x['pct']:+.2f}%</b>"
+            for x in items
+        ) or "无"
+
+    def _fmt_rsi(items):
+        return " | ".join(
+            f"<b>{x['sym']} {x['rsi']:.1f}</b>"
+            for x in items
+        ) or "无"
+
+    def _fmt_vol(items):
+        return " | ".join(
+            f"<b>{x['sym']} 爆量 {x['mult']:.1f}x</b>"
+            for x in items
+        ) or "无"
+
+    def _fmt_fr(items):
+        return " | ".join(
+            f"<b>{x['sym']} {x['fr']:+.4f}%</b>"
+            for x in items
+        ) or "无"
+
+    def _fmt_near(items, is_high=True):
+        return " | ".join(
+            f"<b>{x['sym']} 距{'前高' if is_high else '前低'} {x['dist']:.2f}%</b>"
+            for x in items
+        ) or "无"
+
+    html = (
+        "<div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); "
+        "color: #e0e0e0; padding: 20px; border-radius: 12px; margin-bottom: 25px; "
+        "border: 1px solid #2c3e50; box-shadow: 0 4px 15px rgba(0,0,0,0.3);'>"
+        f"<h3 style='margin: 0 0 12px 0; color: #ffc107; font-size: 20px; letter-spacing: 1px;'>"
+        f"🔥 本期市场焦点（{label}）</h3>"
+        f"<p style='margin: 0 0 15px 0; color: #a0a0a0; font-size: 13px; font-style: italic;'>{vibe}</p>"
+        "<table style='width:100%; font-size: 14px; border-collapse: collapse;'>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107; width: 110px;'>📈 领涨</td><td>{_fmt_top_gainer(hotspot.get('top_gainers', []))}</td></tr>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107;'>📉 领跌</td><td>{_fmt_top_loser(hotspot.get('top_losers', []))}</td></tr>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107;'>🌡️ 贪婪</td><td style='color:#ff5252;'>{_fmt_rsi(hotspot.get('extreme_greed', []))}</td></tr>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107;'>🧊 恐慌</td><td style='color:#64b5f6;'>{_fmt_rsi(hotspot.get('extreme_fear', []))}</td></tr>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107;'>💥 异动</td><td>{_fmt_vol(hotspot.get('volume_spikes', []))}</td></tr>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107;'>💰 费率</td><td>{_fmt_fr(hotspot.get('funding_extreme', []))}</td></tr>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107;'>⚡ 逼近前高</td><td>{_fmt_near(hotspot.get('near_highs', []), True)}</td></tr>"
+        f"<tr><td style='padding: 6px 0; color:#ffc107;'>🛡️ 逼近前低</td><td>{_fmt_near(hotspot.get('near_lows', []), False)}</td></tr>"
+        "</table></div>"
+    )
+    return html
+
+
+# ============================================================
+# 十一、标的独立卡片
+# ============================================================
 def build_symbol_block(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
     cp_str = f"${cp:.4f}" if isinstance(cp, (int, float)) else "N/A"
     is_spot_mode = md.get("data_mode") == "spot"
 
-    # 🚀 修复：先检查是否有策略异常，若有则直接渲染错误卡片
+    # 策略异常优先渲染
     for sname, sr_obj in r.get("strategy_results", {}).items():
         if sr_obj and sr_obj.get("error"):
             return build_error_card(r, sr_obj["error"])
@@ -498,6 +658,7 @@ def build_symbol_block(r):
 
     html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md)}</div>"
 
+    # ---- 市场状态面板（不再暴露英文） ----
     regime = active_sr.get("regime") if active_sr else None
     regime_desc = active_sr.get("regime_desc") if active_sr else None
     momentum_4h = active_sr.get("momentum_4h") if active_sr else None
@@ -505,25 +666,17 @@ def build_symbol_block(r):
     forbidden = active_sr.get("forbidden_tracks", []) if active_sr else []
 
     if regime:
-        regime_label = {
-            "strong_bull": "🟢🟢 强多头",
-            "weak_bull": "🟢 弱多头",
-            "weak_bull_warning": "🚨 弱多头（警告）",
-            "ranging": "⚪ 震荡",
-            "weak_bear": "🔴 弱空头",
-            "strong_bear": "🔴🔴 强空头",
-        }.get(regime, regime)
-
-        track_names = {"track_1": "底部突破", "track_2": "做空", "track_3": "暴跌反弹", "track_4": "趋势回踩"}
+        regime_label = REGIME_MAP.get(regime, regime)
+        momentum_cn = MOMENTUM_4H_MAP.get(momentum_4h, "未知")
 
         html += "<div style='margin: 15px; padding: 12px; background:#f0f4f8; border-left:5px solid #2c3e50; border-radius:0 8px 8px 0;'>"
-        html += f"<p style='margin:0; font-size:15px; font-weight:bold; color:#2c3e50;'>🎛️ 市场状态：{regime_label}（4H动能={momentum_4h or '?'}）</p>"
+        html += f"<p style='margin:0; font-size:15px; font-weight:bold; color:#2c3e50;'>🎛️ 市场状态：{regime_label}（4H动能：{momentum_cn}）</p>"
         html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#555;'>{regime_desc}</p>"
         if allowed:
-            allowed_str = "、".join([track_names.get(t, t) for t in allowed])
+            allowed_str = "、".join([TRACK_NAME_MAP.get(t, t) for t in allowed])
             html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#27ae60;'>✅ 允许轨道：{allowed_str}</p>"
         if forbidden:
-            forbidden_str = "、".join([track_names.get(t, t) for t in forbidden])
+            forbidden_str = "、".join([TRACK_NAME_MAP.get(t, t) for t in forbidden])
             html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e74c3c;'>❌ 禁止轨道：{forbidden_str}</p>"
         if active_sr.get("conflict_note"):
             html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e67e22; font-weight:bold;'>{active_sr['conflict_note']}</p>"
@@ -555,7 +708,6 @@ def build_symbol_block(r):
         html += f"<p style='color:#666; font-size:15px;'>当前标的尚未触发开枪信号，以下是各轨道的推演情况：</p>"
         for sname, sr_obj in r.get("strategy_results", {}).items():
             if not sr_obj:
-                # 🚀 修复：None 显式渲染
                 html += (
                     "<div style='margin-top:15px; padding:10px; "
                     "border-left:4px solid #d32f2f; background:#ffebee; border-radius:0 5px 5px 0;'>"
@@ -565,8 +717,6 @@ def build_symbol_block(r):
                 continue
 
             html += f"<div style='margin-top:15px; padding-left:10px; border-left:4px solid #8e44ad; background:#fafafa; padding:10px; border-radius:0 5px 5px 0;'>"
-
-            # 🚀 修复：策略内部异常时显式渲染错误
             if sr_obj.get("error"):
                 html += (
                     "<div style='background:#ffebee; padding:10px; border-radius:5px; margin-bottom:8px;'>"
@@ -598,6 +748,9 @@ def build_symbol_block(r):
     return html
 
 
+# ============================================================
+# 十二、总览面板
+# ============================================================
 def build_dashboard(results, triggered_list, untriggered_list):
     triggered_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
     untriggered_syms = [r['symbol'].replace('_USDT','') for r in untriggered_list if r.get("status") == "ok"]
@@ -623,75 +776,150 @@ def build_dashboard(results, triggered_list, untriggered_list):
     return html
 
 
-def generate_dynamic_subject(triggered_list, untriggered_list, results):
-    tr_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
+# ============================================================
+# 十三、动态标题
+# ============================================================
+def _fmt_pct(v):
+    try:
+        return f"{float(v):.1f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def generate_dynamic_subject(triggered_list, untriggered_list, results, hotspot=None):
+    now = datetime.now(BJT)
+    hour = now.hour
+    from report_lexicon import judge_session, SESSION_MAP
+    session_key = judge_session(hour)
+    session_label = SESSION_MAP.get(session_key, {}).get("label", "")
+
+    tr_syms = [r['symbol'].replace('_USDT', '') for r in triggered_list]
+
+    # ---- 收集数据锚点 ----
     all_directions, all_sub = [], []
-    max_rsi, min_rsi, max_fp, min_adx = 0, 100, 0, 100
+    long_syms, short_syms = [], []
+    max_rsi, min_rsi = 0, 100
+    greedy_syms, fear_syms = [], []
 
     for r in results:
-        if r.get("status") != "ok": continue
+        if r.get("status") != "ok":
+            continue
         md = r.get("market_data", {})
-        rsi, adx, fp = md.get("rsi"), md.get("adx"), md.get("funding_percentile")
-        if rsi: max_rsi, min_rsi = max(max_rsi, rsi), min(min_rsi, rsi)
-        if adx: min_adx = min(min_adx, adx)
-        if fp: max_fp = max(max_fp, fp)
+        sym = r["symbol"].replace("_USDT", "")
+        rsi = md.get("rsi")
+        if rsi is not None:
+            if rsi > max_rsi: max_rsi = rsi
+            if rsi < min_rsi: min_rsi = rsi
+            if rsi >= 70: greedy_syms.append(sym)
+            if rsi <= 30: fear_syms.append(sym)
         for sr in r.get("strategy_results", {}).values():
             if sr and sr.get("triggered"):
-                all_directions.append(sr.get("direction"))
-                if sr.get("direction") == "short":
+                d = sr.get("direction")
+                all_directions.append(d)
+                if d == "short":
                     all_sub.append(sr.get("track_2", {}).get("sub_type"))
+                    short_syms.append(sym)
+                elif d and d.startswith("long"):
+                    long_syms.append(sym)
 
-    is_short = "short" in all_directions
-    is_long = any(d.startswith("long") for d in all_directions)
-    has_tf = "trend_follow" in all_sub
+    # ---- 从标题池挑选 ----
+    pool = None
+    kwargs = {}
 
     if triggered_list:
-        if len(triggered_list) >= 2:
-            return random.choice([
-                f"🚨【参谋长重磅战报】多空双杀！{', '.join(tr_syms[:3])}全线暴动！速看！",
-                f"🔥【牛来参谋长】冰火两重天！多币种触发信号，主力底牌已被看穿！",
-                f"💥【参谋长战报】大行情来了！{', '.join(tr_syms[:3])}齐爆，跟紧不迷路！"
-            ])
-        elif is_short and is_long:
-            return "🚨【参谋长战报】多空双杀！主力露出獠牙！"
-        elif is_short:
-            if has_tf:
-                return random.choice([
-                    f"📉【参谋长战报】下跌中继确认！{tr_syms[0]}顺势做空机会已到！",
-                    f"🔪【牛来参谋长】错过顶部不要紧，{tr_syms[0]}顺势空单照样吃肉！"
-                ])
-            return f"🩸【参谋长战报】瀑布警告！{tr_syms[0]}即将暴跌？"
+        if len(triggered_list) >= 2 and long_syms and short_syms:
+            pool = SUBJECT_POOL["multi_trigger_both"]
+            kwargs = {
+                "session": session_label, "n": len(triggered_list),
+                "long_syms": "、".join(long_syms[:2]),
+                "short_syms": "、".join(short_syms[:2]),
+            }
+        elif len(triggered_list) >= 2:
+            pool = SUBJECT_POOL["multi_trigger_same"]
+            kwargs = {
+                "session": session_label, "n": len(triggered_list),
+                "syms": "、".join(tr_syms[:3]),
+            }
         else:
-            return f"🚀【参谋长战报】火箭点火！{tr_syms[0]}暴力拉升！"
+            sym = tr_syms[0]
+            # 从对应标的提取 RSI/费率
+            rsi_v = fr_v = fp_v = adx_v = kdj_v = rh_v = "?"
+            for r in triggered_list:
+                md = r.get("market_data", {})
+                rsi_v = _fmt_pct(md.get("rsi"))
+                fr_v = _fmt_pct(md.get("funding_rate"))
+                fp_v = f"{md.get('funding_percentile'):.1%}" if md.get("funding_percentile") is not None else "?"
+                adx_v = _fmt_pct(md.get("adx"))
+                kdj_v = _fmt_pct((md.get("kdj_1h") or {}).get("j"))
+                rh_v = _fmt_pct(md.get("recent_high"))
+                break
+
+            is_short = any(d == "short" for d in all_directions)
+            if is_short:
+                pool = SUBJECT_POOL["single_trigger_short"]
+            else:
+                pool = SUBJECT_POOL["single_trigger_long"]
+
+            kwargs = {
+                "session": session_label, "sym": sym,
+                "rsi": rsi_v, "rsi_1h": rsi_v, "fr": fr_v, "fp": fp_v,
+                "adx": adx_v, "kdj_j": kdj_v, "rh": rh_v, "pct": "?",
+            }
     else:
-        if min_adx < 20:
-            return random.choice([f"⚠️【参谋长推演】大盘死水微澜？主力正在密谋大动作！", f"🛡️【参谋长推演】ADX告急！主力高度控盘！"])
-        elif max_rsi >= 70:
-            return random.choice([f"🎈【参谋长预警】极度贪婪！RSI飙至{max_rsi:.0f}！", f"🔪【参谋长推演】散户狂欢倒计时？"])
-        elif min_rsi <= 35:
-            return random.choice([f"🩸【参谋长推演】极度恐慌！RSI砸至{min_rsi:.0f}！", f"💎【参谋长推演】带血的筹码满地都是！"])
+        # 未触发场景
+        if greedy_syms or (max_rsi >= 70):
+            pool = SUBJECT_POOL["no_trigger_greedy"]
+            kwargs = {
+                "sym": greedy_syms[0] if greedy_syms else "市场",
+                "syms": "、".join(greedy_syms[:3]) or "全市场",
+                "rsi": _fmt_pct(max_rsi),
+            }
+        elif fear_syms or (min_rsi <= 30):
+            pool = SUBJECT_POOL["no_trigger_panic"]
+            kwargs = {
+                "sym": fear_syms[0] if fear_syms else "市场",
+                "syms": "、".join(fear_syms[:3]) or "全市场",
+                "rsi": _fmt_pct(min_rsi),
+            }
         else:
-            return random.choice([f"🔮【参谋长推演】多空博弈白热化！", f"🐮【参谋长推演】盘面暗流涌动！"])
+            pool = SUBJECT_POOL["no_trigger_quiet"]
+            kwargs = {"session": session_label}
+
+    try:
+        subject = _pick_unique_subject(pool) if pool else ""
+        subject = fill(subject, **kwargs)
+    except Exception:
+        subject = f"【参谋长推演】{session_label}盘报告"
+
+    return subject or f"【参谋长推演】{session_label}盘报告"
 
 
-def build_report(results, active_strategies, watchlist):
+# ============================================================
+# 十四、报告主入口
+# ============================================================
+def build_report(results, active_strategies, watchlist, hotspot=None):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     triggered_list, untriggered_list = [], []
     for r in results:
         has = any(sr and sr.get("triggered") for sr in r.get("strategy_results", {}).values())
         (triggered_list if has else untriggered_list).append(r)
 
-    subject = generate_dynamic_subject(triggered_list, untriggered_list, results)
+    subject = generate_dynamic_subject(triggered_list, untriggered_list, results, hotspot=hotspot)
 
-    html = f"<html><body style='font-family:Arial,sans-serif;max-width:900px;margin:0 auto;color:#333;padding:10px; background-color:#f4f6f8;'>"
+    html = "<html><body style='font-family:Arial,sans-serif;max-width:900px;margin:0 auto;color:#333;padding:10px; background-color:#f4f6f8;'>"
     html += AD_BANNER
-    html += f"<div style='background:white; padding:20px; border-radius:10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);'>"
-    html += f"<h2 style='border-bottom: 3px solid #e74c3c; padding-bottom: 10px; color:#2c3e50;'>📊 参谋长多周期共振报告</h2>"
+    html += "<div style='background:white; padding:20px; border-radius:10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);'>"
+    html += "<h2 style='border-bottom: 3px solid #e74c3c; padding-bottom: 10px; color:#2c3e50;'>📊 参谋长多周期共振报告</h2>"
     html += f"<p style='color:#666;'><b>时间：</b>{now} | <b>策略：</b>{', '.join(active_strategies)} | <b>周期：</b>1D · 4H · 1H · 30m</p>"
+
+    # 热点开场
+    try:
+        html += build_hotspot_section(hotspot)
+    except Exception:
+        pass
 
     html += build_dashboard(results, triggered_list, untriggered_list)
 
-    # 🚀 修复：单个标的渲染失败不影响整体
     if triggered_list:
         html += "<h3 style='color:#e74c3c; border-left:5px solid #e74c3c; padding-left:10px; font-size:22px; margin-top:30px;'>🚨 参谋长开枪警告</h3>"
         for r in triggered_list:
@@ -711,7 +939,8 @@ def build_report(results, active_strategies, watchlist):
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 点赞、转发、关注「牛来参谋长」！</p>"
+    # 修复上次的引号语法错误：用中文「」避免与外层 f-string 冲突
+    html += "<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 点赞、转发、关注「牛来参谋长」！</p>"
     html += "</div></body></html>"
     return subject, html
 
