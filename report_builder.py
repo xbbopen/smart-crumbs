@@ -427,7 +427,38 @@ def build_symbol_block(r):
     """
 
     html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md)}</div>"
+    # 🚀 新增：市场状态面板
+    regime = active_sr.get("regime") if active_sr else None
+    regime_desc = active_sr.get("regime_desc") if active_sr else None
+    momentum_4h = active_sr.get("momentum_4h") if active_sr else None
+    allowed = active_sr.get("allowed_tracks", []) if active_sr else []
+    forbidden = active_sr.get("forbidden_tracks", []) if active_sr else []
 
+    if regime:
+        regime_label = {
+            "strong_bull": "🟢🟢 强多头",
+            "weak_bull": "🟢 弱多头",
+            "weak_bull_warning": "🚨 弱多头（警告）",
+            "ranging": "⚪ 震荡",
+            "weak_bear": "🔴 弱空头",
+            "strong_bear": "🔴🔴 强空头",
+        }.get(regime, regime)
+
+        track_names = {"track_1": "底部突破", "track_2": "做空", "track_3": "暴跌反弹", "track_4": "趋势回踩"}
+
+        html += "<div style='margin: 15px; padding: 12px; background:#f0f4f8; border-left:5px solid #2c3e50; border-radius:0 8px 8px 0;'>"
+        html += f"<p style='margin:0; font-size:15px; font-weight:bold; color:#2c3e50;'>🎛️ 市场状态：{regime_label}（4H动能={momentum_4h or '?'}）</p>"
+        html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#555;'>{regime_desc}</p>"
+        if allowed:
+            allowed_str = "、".join([track_names.get(t, t) for t in allowed])
+            html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#27ae60;'>✅ 允许轨道：{allowed_str}</p>"
+        if forbidden:
+            forbidden_str = "、".join([track_names.get(t, t) for t in forbidden])
+            html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e74c3c;'>❌ 禁止轨道：{forbidden_str}</p>"
+        if active_sr.get("conflict_note"):
+            html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e67e22; font-weight:bold;'>{active_sr['conflict_note']}</p>"
+        html += "</div>"
+        
     if is_triggered:
         ta = active_sr.get(track_key, {})
         max_score = ta.get("max", 6)
