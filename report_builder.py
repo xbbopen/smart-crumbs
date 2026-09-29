@@ -1,13 +1,17 @@
+# -*- coding: utf-8 -*-
 from datetime import datetime, timezone, timedelta
 import random
 
 BJT = timezone(timedelta(hours=8))
 
+
 def translate_asset_type(asset_type):
     return {"futures": "合约", "spot": "现货"}.get(asset_type, asset_type)
 
+
 def translate_trend(t):
     return {"up": "🟢 多头", "down": "🔴 空头", "neutral": "⚪ 震荡", None: "❓ 未知"}.get(t, "❓ 未知")
+
 
 CONDITION_EXPLANATIONS = {
     "硬条件": "该轨道能否开单的前置门槛",
@@ -63,6 +67,7 @@ AD_BANNER = """
 </div>
 """
 
+
 def get_leverage_advice(oi):
     if oi is None: return "数据受限，建议3x以下轻仓试错。"
     if oi > 500_000_000: return "【资金极度充裕】建议杠杆20x-50x（快进快出）。"
@@ -70,8 +75,21 @@ def get_leverage_advice(oi):
     if oi > 5_000_000: return "【中等流动性】建议杠杆5x-10x。"
     return "【流动性差】建议杠杆2x-3x（极易被插针，保命要紧）。"
 
+
 # ================= 多周期面板渲染 =================
 def render_multi_tf_panel(md):
+    def _fmt(v, fmt=".1f"):
+        """安全格式化：None / NaN / 非数字 → N/A"""
+        if v is None:
+            return "N/A"
+        try:
+            f = float(v)
+            if f != f:  # NaN
+                return "N/A"
+            return format(f, fmt)
+        except (TypeError, ValueError):
+            return "N/A"
+
     trend_1d = md.get("trend_1d")
     trend_4h = md.get("trend_4h")
     rsi_1h = md.get("rsi_1h")
@@ -89,10 +107,10 @@ def render_multi_tf_panel(md):
     ma10_30m = md.get("ma10")
     adx_30m = md.get("adx")
 
-    rsi_1d_str = f"{rsi_1d:.1f}" if rsi_1d is not None else "N/A"
-    rsi_4h_str = f"{rsi_4h:.1f}" if rsi_4h is not None else "N/A"
-    rsi_1h_str = f"{rsi_1h:.1f}" if rsi_1h is not None else "N/A"
-    rsi_30m_str = f"{rsi_30m:.1f}" if rsi_30m is not None else "N/A"
+    rsi_1d_str = _fmt(rsi_1d)
+    rsi_4h_str = _fmt(rsi_4h)
+    rsi_1h_str = _fmt(rsi_1h)
+    rsi_30m_str = _fmt(rsi_30m)
 
     h1_trend = "neutral"
     if price and boll_1h.get("mid"):
@@ -152,6 +170,7 @@ def render_multi_tf_panel(md):
     html += "</div>"
     return html
 
+
 # ================= 行情阶段推演器 =================
 def generate_market_stage(r):
     md = r.get("market_data", {})
@@ -165,21 +184,25 @@ def generate_market_stage(r):
     if cp is None or rl is None or rh is None:
         return "数据不足", "无法推演当前阶段。"
 
-    if trend_1d == "up" and trend_4h == "up":
-        if ma10 and cp < ma10 and cp > rl * 1.05:
-            return "🔥 多头回踩期", "1D+4H双多头共振，价格回踩至生命线下方。这是经典的'趋势回踩'黄金坑，等30m止跌即可入场。"
+    try:
+        if trend_1d == "up" and trend_4h == "up":
+            if ma10 and cp < ma10 and cp > rl * 1.05:
+                return "🔥 多头回踩期", "1D+4H双多头共振，价格回踩至生命线下方。这是经典的'趋势回踩'黄金坑，等30m止跌即可入场。"
+            else:
+                return "🚀 多头趋势期", "1D+4H双多头共振，趋势健康。回调即买入机会，坚决不做空。"
+        elif trend_1d == "down" and trend_4h == "down":
+            return "🔪 空头趋势期", "1D+4H双空头共振，反弹即做空机会。绝对不要抄底，等暴跌后RSI超卖再考虑反弹。"
+        elif cp <= rl * 1.03:
+            return "🟢 潜伏期（底部区域）", "价格在主力洗盘底线附近摩擦，等放量突破。"
+        elif ma10 and cp < ma10:
+            return "🚨 衰竭期（跌破生命线）", f"价格跌破MA10({ma10:.4f})，趋势走弱信号。"
+        elif cp >= rh * 0.97:
+            return "⚡ 冲顶期（高位博弈）", f"逼近近期高点{rh}，多空博弈白热化。"
         else:
-            return "🚀 多头趋势期", "1D+4H双多头共振，趋势健康。回调即买入机会，坚决不做空。"
-    elif trend_1d == "down" and trend_4h == "down":
-        return "🔪 空头趋势期", "1D+4H双空头共振，反弹即做空机会。绝对不要抄底，等暴跌后RSI超卖再考虑反弹。"
-    elif cp <= rl * 1.03:
-        return "🟢 潜伏期（底部区域）", "价格在主力洗盘底线附近摩擦，等放量突破。"
-    elif ma10 and cp < ma10:
-        return "🚨 衰竭期（跌破生命线）", f"价格跌破MA10({ma10:.4f})，趋势走弱信号。"
-    elif cp >= rh * 0.97:
-        return "⚡ 冲顶期（高位博弈）", f"逼近近期高点{rh}，多空博弈白热化。"
-    else:
-        return "⏳ 震荡期（蓄势待发）", "行情震荡，等方向选择。"
+            return "⏳ 震荡期（蓄势待发）", "行情震荡，等方向选择。"
+    except Exception as e:
+        return "推演异常", f"阶段推演出错：{type(e).__name__}: {e}"
+
 
 # ================= 参谋长解读 =================
 def generate_commander_comment(r, is_triggered):
@@ -190,8 +213,6 @@ def generate_commander_comment(r, is_triggered):
     fp = md.get("funding_percentile")
     fr = md.get("funding_rate")
     is_spot_mode = md.get("data_mode") == "spot"
-    trend_1d = md.get("trend_1d")
-    trend_4h = md.get("trend_4h")
     rsi_1h = md.get("rsi_1h")
 
     rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
@@ -205,10 +226,29 @@ def generate_commander_comment(r, is_triggered):
         if sr:
             for tk in ["track_1", "track_2", "track_3", "track_4"]:
                 s = sr.get(tk, {}).get("score", 0)
-                if s > max_score: max_score, best_sr = s, sr
+                if s > max_score:
+                    max_score, best_sr = s, sr
+
+    # 🚀 修复：策略异常时明确显示，不返回空内容
+    if best_sr and best_sr.get("error"):
+        return (
+            "<div style='background:#ffebee; padding:12px; border-left:5px solid #d32f2f; "
+            "margin-top:10px; border-radius:5px;'>"
+            f"<b>🐮 参谋长解读：</b><span style='color:#c62828; font-weight:bold;'>"
+            f"⚠️ 该标的策略执行异常，本轮无法推演。错误：{best_sr['error']}</span></div>"
+        )
+
+    # 🚀 修复：所有策略均未返回有效结果（best_sr is None）
+    if best_sr is None:
+        return (
+            "<div style='background:#fff3e0; padding:12px; border-left:5px solid #ef6c00; "
+            "margin-top:10px; border-radius:5px;'>"
+            f"<b>🐮 参谋长解读：</b><span style='color:#e65100;'>"
+            f"该标的未返回任何策略结果，请检查 monitor 日志。</span></div>"
+        )
 
     comment = ""
-    if is_triggered and best_sr:
+    if is_triggered:
         direction = best_sr.get("direction")
         if direction == "short":
             sub_type = best_sr.get("track_2", {}).get("sub_type", "reversal")
@@ -226,18 +266,23 @@ def generate_commander_comment(r, is_triggered):
             comment = f"{r['symbol']} 蓄力完毕，主力点火起飞！双周期共振多头，动能温和。这波趋势我们要吃满！"
         return f"<div style='background:#fff3cd; padding:12px; border-left:5px solid #e74c3c; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#c0392b; font-weight:bold;'>{comment}</span></div>"
 
-    if best_sr:
-        if adx is not None and adx < 20:
-            comment = f"{r['symbol']} 现在ADX只有{adx_str}，主力高度控盘，无序震荡，进去就是送人头。管住手！"
-        elif rsi is not None and rsi >= 70 and not is_spot_mode:
-            comment = f"注意风险！{r['symbol']} 30m RSI={rsi_str}，当前费率{fr_str}。别被FOMO冲昏头脑，等它见顶信号，准备反手做空！"
-        elif rsi is not None and rsi <= 35:
-            comment = f"机会在酝酿！{r['symbol']} RSI={rsi_str}，极度恐慌。子弹已经上膛，等企稳信号！"
+    # 未触发
+    if adx is not None and adx < 20:
+        comment = f"{r['symbol']} 现在ADX只有{adx_str}，主力高度控盘，无序震荡，进去就是送人头。管住手！"
+    elif rsi is not None and rsi >= 70 and not is_spot_mode:
+        comment = f"注意风险！{r['symbol']} 30m RSI={rsi_str}，当前费率{fr_str}。别被FOMO冲昏头脑，等它见顶信号，准备反手做空！"
+    elif rsi is not None and rsi <= 35:
+        comment = f"机会在酝酿！{r['symbol']} RSI={rsi_str}，极度恐慌。子弹已经上膛，等企稳信号！"
+    else:
+        if max_score >= 3:
+            comment = f"马上要触发了！{r['symbol']} 各项指标都在临界点，主力意图已经暴露，死死盯盘！"
+        elif max_score >= 2:
+            comment = f"{r['symbol']} 盘面暗流涌动，主力小动作藏不住了。耐心等信号。"
         else:
-            if max_score >= 3: comment = f"马上要触发了！{r['symbol']} 各项指标都在临界点，主力意图已经暴露，死死盯盘！"
-            elif max_score >= 2: comment = f"{r['symbol']} 盘面暗流涌动，主力小动作藏不住了。耐心等信号。"
-            else: comment = f"{r['symbol']} 目前垃圾时间，各项指标不达标。空仓休息，等信号。"
+            comment = f"{r['symbol']} 目前垃圾时间，各项指标不达标。空仓休息，等信号。"
+
     return f"<div style='background:#f8f9fa; padding:12px; border-left:5px solid #3498db; margin-top:10px; border-radius:5px;'><b>🐮 参谋长解读：</b><span style='color:#2c3e50;'>{comment}</span></div>"
+
 
 def render_track_details(details, max_score):
     html = ""
@@ -256,9 +301,9 @@ def render_track_details(details, max_score):
             html += "</li>"
     return html
 
-# ================= 🚀 入场计划渲染（现货/合约区分） =================
+
+# ================= 入场计划渲染 =================
 def render_entry_plan(entry_plan, direction, cp, cp_str, md):
-    """合约模式：显示保证金和杠杆。现货模式：显示买入金额和币数量。"""
     if not entry_plan:
         return ""
 
@@ -291,7 +336,6 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     if stop:
         risk_pct = abs(avg_price - stop) / avg_price
         if is_spot_mode:
-            # 现货：2%规则，本金10000 USDT，单笔最大亏损200 USDT
             max_loss = 200
             position_value = min(10000, max_loss / risk_pct) if risk_pct > 0 else 10000
             coin_amount = position_value / avg_price if avg_price else 0
@@ -301,7 +345,6 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
             html += f"对应 <b>{coin_amount:.4f} 个 {md.get('symbol','').replace('_USDT','')}</b>。<br>"
             html += f"<span style='color:#e67e22;'>若止损触发，最大亏损约 {max_loss} U（占本金 2%）。</span></p>"
         else:
-            # 合约：2%规则，10倍杠杆
             position_pct = min(0.5, 0.02 / risk_pct) if risk_pct > 0 else 0.5
             position_value = 10000 * position_pct
             margin_10x = position_value / 10
@@ -312,7 +355,6 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
             html += f"10倍杠杆下，投入保证金 <b>{margin_10x:.2f} USDT</b>，"
             html += f"总开仓数量 <b>{coin_amount:.4f} 个</b>（按各档位权重分配）。</p>"
 
-    # 移动止盈
     if avg_price and stop:
         if direction and direction.startswith("long"):
             tp1 = avg_price + abs(avg_price - stop) * 1.0
@@ -333,12 +375,40 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     html += "</div>"
     return html
 
+
+# ================= 🚀 策略异常专用卡片 =================
+def build_error_card(r, err_msg: str):
+    """策略执行异常时的简洁卡片，明确指出问题标的和错误。"""
+    sym = r['symbol'].replace('_USDT', '')
+    return f"""
+    <div style="border: 3px solid #d32f2f; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); overflow: hidden;">
+        <div style="background: linear-gradient(135deg, #d32f2f 0%, #b71c1c 100%); color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #ffc107;">
+            <div>
+                <span style="font-size: 28px; font-weight: 900; letter-spacing: 2px; color: #ffd54f; text-shadow: 1px 1px 3px rgba(0,0,0,0.5);">💥 {sym}</span>
+                <span style="font-size: 16px; opacity: 0.9; margin-left: 10px; color: #fff;">策略异常</span>
+            </div>
+            <div style="background: #ffc107; color: #b71c1c; padding: 6px 15px; border-radius: 20px; font-weight: bold; font-size: 14px;">❌ 未能分析</div>
+        </div>
+        <div style="padding: 20px; background: #fff;">
+            <p style="margin: 0 0 8px 0; font-size: 15px; color: #c62828; font-weight: bold;">❌ 策略执行异常，本轮无法对该标的推演。</p>
+            <p style="margin: 0; font-size: 13px; color: #666; font-family: monospace; background: #fafafa; padding: 10px; border-radius: 5px; word-break: break-all;">{err_msg}</p>
+            <p style="margin: 12px 0 0 0; font-size: 12px; color: #888;">提示：详见 GitHub Actions 日志中的完整 Python traceback。</p>
+        </div>
+    </div>
+    """
+
+
 # ================= 标的独立卡片 =================
 def build_symbol_block(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
     cp_str = f"${cp:.4f}" if isinstance(cp, (int, float)) else "N/A"
     is_spot_mode = md.get("data_mode") == "spot"
+
+    # 🚀 修复：先检查是否有策略异常，若有则直接渲染错误卡片
+    for sname, sr_obj in r.get("strategy_results", {}).items():
+        if sr_obj and sr_obj.get("error"):
+            return build_error_card(r, sr_obj["error"])
 
     triggered_direction = None
     active_sr = None
@@ -427,7 +497,7 @@ def build_symbol_block(r):
     """
 
     html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md)}</div>"
-    # 🚀 新增：市场状态面板
+
     regime = active_sr.get("regime") if active_sr else None
     regime_desc = active_sr.get("regime_desc") if active_sr else None
     momentum_4h = active_sr.get("momentum_4h") if active_sr else None
@@ -458,7 +528,7 @@ def build_symbol_block(r):
         if active_sr.get("conflict_note"):
             html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e67e22; font-weight:bold;'>{active_sr['conflict_note']}</p>"
         html += "</div>"
-        
+
     if is_triggered:
         ta = active_sr.get(track_key, {})
         max_score = ta.get("max", 6)
@@ -470,15 +540,12 @@ def build_symbol_block(r):
         html += render_track_details(ta.get("details", {}), max_score)
         html += "</ul>"
 
-        # 🚀 入场计划：区分现货/合约
         entry_plan = active_sr.get("entry_plan")
         if triggered_direction == "spot_warning":
-            # 现货逃顶预警：显示减仓建议
             html += "<div style='background:#fff3cd; padding:15px; border-left:5px solid #e67e22; border-radius:0 8px 8px 0; margin-top:15px;'>"
             html += "<p style='margin:0; color:#e67e22; font-weight:bold;'>⚠️ 现货模式无法做空。这是逃顶预警信号，建议现有多单分批止盈减仓，不要再追多。</p>"
             html += "</div>"
         elif entry_plan:
-            # 现货或合约，正常显示入场计划（render_entry_plan 内部会区分）
             html += render_entry_plan(entry_plan, triggered_direction, cp, cp_str, md)
 
         html += generate_commander_comment(r, is_triggered=True)
@@ -487,11 +554,32 @@ def build_symbol_block(r):
         html += f"<div style='padding: 20px;'>"
         html += f"<p style='color:#666; font-size:15px;'>当前标的尚未触发开枪信号，以下是各轨道的推演情况：</p>"
         for sname, sr_obj in r.get("strategy_results", {}).items():
-            if not sr_obj: continue
+            if not sr_obj:
+                # 🚀 修复：None 显式渲染
+                html += (
+                    "<div style='margin-top:15px; padding:10px; "
+                    "border-left:4px solid #d32f2f; background:#ffebee; border-radius:0 5px 5px 0;'>"
+                    f"<p style='margin:0; color:#c62828; font-weight:bold;'>"
+                    f"❌ 策略 {sname} 未返回结果</p></div>"
+                )
+                continue
+
             html += f"<div style='margin-top:15px; padding-left:10px; border-left:4px solid #8e44ad; background:#fafafa; padding:10px; border-radius:0 5px 5px 0;'>"
+
+            # 🚀 修复：策略内部异常时显式渲染错误
+            if sr_obj.get("error"):
+                html += (
+                    "<div style='background:#ffebee; padding:10px; border-radius:5px; margin-bottom:8px;'>"
+                    f"<p style='margin:0; color:#c62828; font-weight:bold;'>"
+                    f"❌ 策略 {sname} 执行异常：{sr_obj['error']}</p></div>"
+                )
+
             html += f"<p style='margin-top:0; font-weight:bold; color:#8e44ad;'>策略推演：{sname}</p>"
             track2_name = "🟢 现货逃顶预警" if is_spot_mode else "🔪 见顶做空 + 📉 顺势做空"
-            for tk, tn in [("track_1","🚀 底部突破做多"),("track_2",track2_name),("track_3","🩸 暴跌反弹做多"),("track_4","🎯 趋势回踩做多")]:
+            for tk, tn in [("track_1", "🚀 底部突破做多"),
+                           ("track_2", track2_name),
+                           ("track_3", "🩸 暴跌反弹做多"),
+                           ("track_4", "🎯 趋势回踩做多")]:
                 ta = sr_obj.get(tk, {})
                 hard = "✅ 硬条件通过" if ta.get("hard_ok") else "❌ 硬条件未过"
                 score = ta.get('score', 0)
@@ -509,9 +597,15 @@ def build_symbol_block(r):
     html += "</div>"
     return html
 
+
 def build_dashboard(results, triggered_list, untriggered_list):
     triggered_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
     untriggered_syms = [r['symbol'].replace('_USDT','') for r in untriggered_list if r.get("status") == "ok"]
+    error_syms = [
+        r['symbol'].replace('_USDT','') for r in results
+        if any(sr and sr.get("error") for sr in r.get("strategy_results", {}).values())
+        or r.get("status") == "error"
+    ]
     html = "<div style='background:#fff; border:2px solid #34495e; border-radius: 10px; padding: 15px; margin-bottom: 25px;'>"
     html += "<h3 style='margin-top:0; color:#2c3e50; border-bottom:2px dashed #eee; padding-bottom:10px;'>📋 本期监控全景图</h3>"
     if triggered_syms:
@@ -519,11 +613,15 @@ def build_dashboard(results, triggered_list, untriggered_list):
         html += f"<p style='font-size: 16px; color: #e74c3c;'><b>🚨 触发信号：</b> {badges}</p>"
     else:
         html += f"<p style='font-size: 16px; color: #888;'><b>🚨 触发信号：</b> 无。</p>"
+    if error_syms:
+        badges = "".join([f"<span style='background:#ffebee;color:#c62828;padding:3px 8px;border-radius:5px;margin:2px;border:1px solid #d32f2f;'>{s}</span>" for s in error_syms])
+        html += f"<p style='font-size: 14px; color: #c62828;'><b>❌ 策略异常：</b> {badges}</p>"
     if untriggered_syms:
         badges = "".join([f"<span style='background:#ecf0f1;color:#2c3e50;padding:3px 8px;border-radius:5px;margin:2px;'>{s}</span>" for s in untriggered_syms])
         html += f"<p style='font-size: 14px; color: #555;'><b>🔮 盘面推演：</b> {badges}</p>"
     html += "</div>"
     return html
+
 
 def generate_dynamic_subject(triggered_list, untriggered_list, results):
     tr_syms = [r['symbol'].replace('_USDT','') for r in triggered_list]
@@ -575,6 +673,7 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results):
         else:
             return random.choice([f"🔮【参谋长推演】多空博弈白热化！", f"🐮【参谋长推演】盘面暗流涌动！"])
 
+
 def build_report(results, active_strategies, watchlist):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     triggered_list, untriggered_list = [], []
@@ -592,20 +691,30 @@ def build_report(results, active_strategies, watchlist):
 
     html += build_dashboard(results, triggered_list, untriggered_list)
 
+    # 🚀 修复：单个标的渲染失败不影响整体
     if triggered_list:
         html += "<h3 style='color:#e74c3c; border-left:5px solid #e74c3c; padding-left:10px; font-size:22px; margin-top:30px;'>🚨 参谋长开枪警告</h3>"
-        for r in triggered_list: html += build_symbol_block(r)
+        for r in triggered_list:
+            try:
+                html += build_symbol_block(r)
+            except Exception as e:
+                html += build_error_card(r, f"报告渲染失败：{type(e).__name__}: {e}")
 
     if untriggered_list:
         html += "<hr><h3 style='color:#27ae60; border-left:5px solid #27ae60; padding-left:10px; font-size:20px; margin-top:30px;'>🔮 盘面推演（未触发）</h3>"
-        for r in untriggered_list: html += build_symbol_block(r)
+        for r in untriggered_list:
+            try:
+                html += build_symbol_block(r)
+            except Exception as e:
+                html += build_error_card(r, f"报告渲染失败：{type(e).__name__}: {e}")
 
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 点赞、转发、关注“牛来参谋长”！</p>"
+    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 点赞、转发、关注"牛来参谋长"！</p>"
     html += "</div></body></html>"
     return subject, html
+
 
 def build_unsupported_section(results):
     unsupported = [r for r in results if r.get("status") == "unsupported"]
@@ -615,6 +724,7 @@ def build_unsupported_section(results):
     html += "</ul>"
     return html
 
+
 def build_glossary_section():
     html = "<hr><h3 style='color:#34495e; border-left:5px solid #34495e; padding-left:10px;'>📖 参谋长指标词典</h3>"
     html += "<div style='background:#f8f9fa; padding:15px; border-radius:8px; font-size:14px; color:#555;'>"
@@ -622,6 +732,7 @@ def build_glossary_section():
         html += f"<p style='margin: 8px 0;'><b>• {name}：</b>{desc}</p>"
     html += "</div>"
     return html
+
 
 def build_risk_warning():
     return """
