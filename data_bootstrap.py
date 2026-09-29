@@ -109,16 +109,12 @@ def main():
     parser.add_argument("--intervals", nargs="*", default=["30m", "4h"])
     args = parser.parse_args()
     
-    # 🚀 一次性压缩数据库
-    from data_db import get_conn
-    import os
+    # 🚀 一次性压缩数据库（使用统一封装）
+    from data_db import vacuum_db
     if os.path.exists("data/market.db"):
         log.info("正在压缩数据库（VACUUM）...")
-        conn = get_conn()
-        conn.execute("VACUUM")
-        conn.commit()
-        conn.close()
-        log.info(f"✅ 压缩完成，当前大小：{db_size_mb():.2f} MB")
+        before, after = vacuum_db()
+        log.info(f"✅ 压缩完成：{before:.2f} MB → {after:.2f} MB")
         
     if args.from_config:
         with open("config/config.json", "r", encoding="utf-8") as f:
