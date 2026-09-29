@@ -711,7 +711,7 @@ def build_report(results, active_strategies, watchlist):
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 点赞、转发、关注"牛来参谋长"！</p>"
+    html += f"<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 点赞、转发、关注「牛来参谋长」！</p>"
     html += "</div></body></html>"
     return subject, html
 
