@@ -1,6 +1,22 @@
 from strategies.base import BaseStrategy
 
 
+# ================= 🚀 新增：币种分层（ATR 止损倍数） =================
+MAJOR_COINS = {"BTC", "ETH"}
+MID_COINS = {"SOL", "BNB", "XRP", "ADA", "AVAX", "LINK", "DOGE"}
+
+
+def get_atr_multiplier(symbol):
+    """按币种流动性/波动性返回 ATR 止损倍数。"""
+    sym = (symbol or "").replace("_USDT", "").replace("_usdt", "").upper()
+    if sym in MAJOR_COINS:
+        return 1.5   # 主流币：1.5倍 ATR
+    elif sym in MID_COINS:
+        return 2.0   # 中市值：2倍 ATR
+    else:
+        return 2.5   # 高波动 altcoin：2.5倍 ATR
+
+
 class V1DefaultStrategy(BaseStrategy):
     version = "v1_default"
     name = "参谋长多周期共振策略"
@@ -9,7 +25,6 @@ class V1DefaultStrategy(BaseStrategy):
     def _calc_4h_momentum(self, md):
         """
         综合判断4H动能，返回：strong_bull / bull / neutral / bear / strong_bear
-        比单纯看EMA20/EMA50更敏感
         """
         ema20 = md.get("ema20_4h")
         ema50 = md.get("ema50_4h")
@@ -18,17 +33,13 @@ class V1DefaultStrategy(BaseStrategy):
         price = md.get("current_price")
 
         score = 0
-        # 1. EMA结构
         if ema20 and ema50:
             score += 1 if ema20 > ema50 else -1
-        # 2. 价格位置
         if ema20 and price:
             score += 1 if price > ema20 else -1
-        # 3. RSI
         if rsi_4h is not None:
             if rsi_4h > 55: score += 1
             elif rsi_4h < 45: score -= 1
-        # 4. MACD
         if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None:
             score += 1 if macd_4h["dif"] > macd_4h["dea"] else -1
 
@@ -38,19 +49,40 @@ class V1DefaultStrategy(BaseStrategy):
         elif score <= -1: return "bear"
         else: return "neutral"
 
+    # ================= 🚀 新增：动量停滞检测 =================
+    def _detect_momentum_stall(self, md):
+        """
+        动量停滞：MACD 柱归一化接近 0 + ADX < 20。
+        典型横盘蓄势/主力观望状态，多数轨道不宜出手。
+        """
+        macd_4h = md.get("macd_4h") or {}
+        adx = md.get("adx")
+        hist = macd_4h.get("hist")
+        price = md.get("current_price")
+
+        if hist is None or adx is None or not price or price <= 0:
+            return False
+        try:
+            hist_pct = abs(float(hist)) / float(price)
+            # 阈值 0.0005 可按实盘观察微调
+            return hist_pct < 0.0005 and adx < 20
+        except (TypeError, ValueError):
+            return False
+
     # ================= 市场状态机 =================
     def _determine_regime(self, md):
         """
         返回 (regime, allowed_tracks, forbidden_tracks, description)
-        regime 五态：
-        - strong_bear: 1D空 + 4H空 → 只允许做空
-        - weak_bear:   1D空 + 4H非空 → 允许做空，禁止做多
-        - strong_bull: 1D多 + 4H多 → 只允许做多
-        - weak_bull:   1D多 + 4H非多 → 做多需谨慎，禁止无脑抄底
-        - ranging:     1D震荡 + 4H震荡 → 短线双向，但加严条件
         """
         trend_1d = md.get("trend_1d")
         momentum_4h = self._calc_4h_momentum(md)
+
+        # 🚀 优先检测动量停滞
+        if self._detect_momentum_stall(md):
+            return ("momentum_stall",
+                    ["track_3"],
+                    ["track_1", "track_2", "track_4"],
+                    "⏸️ 动量停滞：MACD 归零 + ADX 低位，主力按兵不动。仅允许暴跌反弹轨道")
 
         # 1D空 + 4H空
         if trend_1d == "down" and momentum_4h in ("bear", "strong_bear"):
@@ -73,10 +105,9 @@ class V1DefaultStrategy(BaseStrategy):
                     ["track_2", "track_3"],
                     "1D+4H双多头，只允许做多，禁止任何做空")
 
-        # 1D多 + 4H非多（你截图里NEAR/ZEC的情况）
+        # 1D多 + 4H非多
         if trend_1d == "up":
             if momentum_4h in ("bear", "strong_bear"):
-                # 日线多头但4H已转空，这是最危险的陷阱区
                 return ("weak_bull_warning",
                         ["track_2"],
                         ["track_1", "track_3", "track_4"],
@@ -94,7 +125,11 @@ class V1DefaultStrategy(BaseStrategy):
                 "无明确趋势，短线双向操作，条件加严")
 
     # ================= 分档入场计划 =================
-    def _build_entry_plan(self, direction, cp, atr, rh, rl, ma10, boll_mid, trigger_type):
+    def _build_entry_plan(self, symbol, direction, cp, atr, rh, rl, ma10, boll_mid, trigger_type):
+        """
+        🚀 改造：新增 symbol 参数，用于分层 ATR 止损倍数。
+        """
+        atr_mult = get_atr_multiplier(symbol)
         stages = []
         note = ""
 
@@ -108,19 +143,19 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 40, "type": "limit", "price": cp * 0.995, "note": "限价-0.5%"})
                 stages.append({"weight": 35, "type": "limit", "price": cp * 0.99, "note": "限价-1%"})
             if rl:
-                stages.append({"weight": 25, "type": "limit", "price": rl * 1.005, "note": f"近期低点上方"})
+                stages.append({"weight": 25, "type": "limit", "price": rl * 1.005, "note": "近期低点上方"})
             else:
                 stages.append({"weight": 25, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
-            stop = (rl - 2.0 * atr) if (rl and atr) else None
+            stop = (rl - atr_mult * atr) if (rl and atr) else None
             note = "底部突破后往往有回踩，限价单接飞刀"
 
         elif trigger_type == "short_reversal":
             stages.append({"weight": 70, "type": "market", "price": cp, "note": "顶部窗口极短，立即市价"})
             if rh:
-                stages.append({"weight": 30, "type": "limit", "price": rh * 1.01, "note": f"反弹到前高上方加仓"})
+                stages.append({"weight": 30, "type": "limit", "price": rh * 1.01, "note": "反弹到前高上方加仓"})
             else:
                 stages.append({"weight": 30, "type": "limit", "price": cp * 1.02, "note": "反弹+2%"})
-            stop = (rh + 2.0 * atr) if (rh and atr) else None
+            stop = (rh + atr_mult * atr) if (rh and atr) else None
             note = "见顶反转窗口极短，首档必须市价"
 
         elif trigger_type == "short_trend_follow":
@@ -134,15 +169,14 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 60, "type": "limit", "price": cp * 1.01, "note": "限价+1%"})
                 stages.append({"weight": 40, "type": "limit", "price": cp * 1.02, "note": "限价+2%"})
             if boll_mid and atr:
-                stop = boll_mid * 1.02 + 1.0 * atr
+                stop = boll_mid * 1.02 + atr_mult * atr
             elif ma10 and atr:
-                stop = ma10 * 1.02 + 1.0 * atr
+                stop = ma10 * 1.02 + atr_mult * atr
             else:
                 stop = cp * 1.05
             note = "下跌中继的反弹很磨人，等反弹到阻力位挂限价空单"
 
         elif trigger_type == "long_rebound":
-            # 🚀 抄底用限价，绝不追
             if atr:
                 stages.append({"weight": 35, "type": "limit", "price": cp - 0.5 * atr, "note": "限价-0.5ATR"})
                 stages.append({"weight": 35, "type": "limit", "price": cp - 1.5 * atr, "note": "限价-1.5ATR"})
@@ -153,7 +187,7 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 30, "type": "limit", "price": rl * 0.99, "note": "近期低点下方"})
             else:
                 stages.append({"weight": 30, "type": "limit", "price": cp * 0.95, "note": "限价-5%"})
-            stop = (rl - 2.0 * atr) if (rl and atr) else None
+            stop = (rl - atr_mult * atr) if (rl and atr) else None
             note = "暴跌后往往有二次探底，全部限价，避免抄在半山腰"
 
         elif trigger_type == "long_pullback":
@@ -162,7 +196,13 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 40, "type": "limit", "price": boll_mid * 0.99, "note": "布林中轨下方1%"})
             else:
                 stages.append({"weight": 40, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
-            stop = (ma10 - 1.5 * atr) if (ma10 and atr) else (rl - 2.0 * atr if (rl and atr) else None)
+            # 趋势回踩的止损：MA10 - 1.5倍ATR，或近期低点 - atr_mult倍ATR
+            if ma10 and atr:
+                stop = ma10 - 1.5 * atr
+            elif rl and atr:
+                stop = rl - atr_mult * atr
+            else:
+                stop = None
             note = "趋势中回踩到位即入场"
 
         total_weight = sum(s["weight"] for s in stages)
@@ -223,8 +263,11 @@ class V1DefaultStrategy(BaseStrategy):
         rsi_4h_str = f"{rsi_4h:.1f}" if rsi_4h is not None else "N/A"
         kdj_j_str = f"{kdj_1h['j']:.1f}" if kdj_1h.get("j") is not None else "N/A"
 
-        adx_ok_trend = adx is not None and adx >= 20
-        adx_ok_reversal = adx is not None and adx >= 12
+        # 🚀 ADX 门槛分级
+        adx_ok_trend_1 = adx is not None and adx >= 22   # 轨道1：底部突破，需强趋势确认
+        adx_ok_trend_2 = adx is not None and adx >= 20   # 轨道2：做空，标准门槛
+        adx_ok_reversal = adx is not None and adx >= 12  # 轨道3：暴跌反弹，放宽
+        adx_ok_pullback = adx is not None and adx >= 18  # 轨道4：趋势回踩，中门槛
 
         cvd_series = []
         if klines:
@@ -236,11 +279,19 @@ class V1DefaultStrategy(BaseStrategy):
         # ================= 轨道1：底部突破做多 =================
         if not result["track_1"]["allowed"]:
             result["track_1"]["details"]["❌ 状态禁止"] = f"当前状态【{regime}】禁止此轨道"
+        elif rh and (rh - price) / rh < 0.10:
+            # 🚀 互斥约束：距近期高点不足10%，不是"底部区域"
+            result["track_1"]["details"]["硬条件"] = (
+                f"❌ 距近期高点不足10%（当前距高{((rh-price)/rh*100):.1f}%），非底部区域"
+            )
         elif trend_1d == "down" or trend_4h == "down":
             result["track_1"]["details"]["硬条件"] = f"❌ 趋势逆风（1D={trend_1d or '?'}, 4H={trend_4h or '?'}）"
+        elif not adx_ok_trend_1:
+            adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
+            result["track_1"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 22（震荡市假突破多）"
         else:
             result["track_1"]["hard_ok"] = True
-            result["track_1"]["details"]["硬条件"] = f"✅ 1D={trend_1d} + 4H={trend_4h}"
+            result["track_1"]["details"]["硬条件"] = f"✅ 1D={trend_1d} + 4H={trend_4h} + ADX≥22 + 距高点≥10%"
 
             if price <= rl * 1.05:
                 result["track_1"]["score"] += 1
@@ -287,14 +338,13 @@ class V1DefaultStrategy(BaseStrategy):
         if not result["track_2"]["allowed"]:
             result["track_2"]["details"]["❌ 状态禁止"] = f"当前状态【{regime}】禁止做空"
         else:
-            # 做空硬条件
             if momentum_4h in ("bull", "strong_bull"):
                 result["track_2"]["details"]["硬条件"] = "❌ 4H动能向上，禁止做空"
             elif trend_1d == "up" and momentum_4h == "neutral":
                 result["track_2"]["details"]["硬条件"] = "❌ 日线多头 + 4H震荡，做空需4H明确转空"
-            elif not adx_ok_trend:
-                adx_str = f"{adx:.1f}" if adx is not None else "N/A"
-                result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str} < 20"
+            elif not adx_ok_trend_2:
+                adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
+                result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 20"
             else:
                 result["track_2"]["hard_ok"] = True
                 result["track_2"]["details"]["硬条件"] = f"✅ 1D={trend_1d} + 4H={momentum_4h} + ADX≥20"
@@ -328,11 +378,23 @@ class V1DefaultStrategy(BaseStrategy):
                 else:
                     result["track_2"]["details"]["A3.30m CVD顶背离"] = "❌ 数据不足"
 
-                if (rsi_1h is not None and rsi_1h >= 70) or rsi_div == "bearish":
+                # 🚀 A4 扩展：RSI超买 / 顶背离 / 费率极端
+                a4_hit = False
+                a4_reasons = []
+                if rsi_1h is not None and rsi_1h >= 70:
+                    a4_hit = True
+                    a4_reasons.append(f"1h RSI={rsi_1h_str}")
+                if rsi_div == "bearish":
+                    a4_hit = True
+                    a4_reasons.append("1h顶背离")
+                if fp is not None and fp > 0.5:
+                    a4_hit = True
+                    a4_reasons.append(f"费率拥挤度={fp:.1%}")
+                if a4_hit:
                     rev_score += 1
-                    result["track_2"]["details"]["A4.1H RSI超买或顶背离"] = f"✅ 1h RSI={rsi_1h_str}"
+                    result["track_2"]["details"]["A4.1H RSI超买 / 顶背离 / 费率极端"] = f"✅ {' | '.join(a4_reasons)}"
                 else:
-                    result["track_2"]["details"]["A4.1H RSI超买或顶背离"] = f"❌ 1h RSI={rsi_1h_str}"
+                    result["track_2"]["details"]["A4.1H RSI超买 / 顶背离 / 费率极端"] = f"❌ 1h RSI={rsi_1h_str}"
 
                 if kdj_1h.get("j") is not None and kdj_1h["j"] > 100:
                     rev_score += 1
@@ -422,11 +484,10 @@ class V1DefaultStrategy(BaseStrategy):
         elif trend_1d == "down":
             result["track_3"]["details"]["硬条件"] = "❌ 1D趋势向下，禁止抄底"
         elif not adx_ok_reversal:
-            adx_str = f"{adx:.1f}" if adx is not None else "N/A"
-            result["track_3"]["details"]["硬条件"] = f"❌ ADX={adx_str} < 12"
-        # 🚀 核心加固：4H动能是bear/strong_bear时，必须满足极端超卖条件
+            adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
+            result["track_3"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 12"
         elif momentum_4h in ("bear", "strong_bear"):
-            # 严格条件：RSI_4H < 20 + RSI_30m < 20 + 1H KDJ J < -10 + CVD底背离
+            # 严格条件：极端超卖才允许
             extreme_oversold = (
                 (rsi_4h is not None and rsi_4h < 20) and
                 (rsi < 25) and
@@ -439,7 +500,7 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_3"]["hard_ok"] = True
                 result["track_3"]["details"]["硬条件"] = f"✅ 4H下跌但已极端超卖，短线反弹机会"
-                result["track_3"]["score"] = 6  # 强制满分触发
+                result["track_3"]["score"] = 6
         else:
             result["track_3"]["hard_ok"] = True
             result["track_3"]["details"]["硬条件"] = f"✅ 1D={trend_1d} + ADX≥12"
@@ -500,16 +561,29 @@ class V1DefaultStrategy(BaseStrategy):
             result["track_4"]["details"]["❌ 状态禁止"] = f"当前状态【{regime}】禁止此轨道"
         elif trend_1d != "up" or trend_4h != "up":
             result["track_4"]["details"]["硬条件"] = f"❌ 需1D多头+4H多头"
+        elif not adx_ok_pullback:
+            adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
+            result["track_4"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 18（震荡中无回踩可做）"
         else:
             result["track_4"]["hard_ok"] = True
-            result["track_4"]["details"]["硬条件"] = "✅ 1D多头 + 4H多头"
+            result["track_4"]["details"]["硬条件"] = "✅ 1D多头 + 4H多头 + ADX≥18"
 
-            if boll_mid and abs(price - boll_mid) / boll_mid <= 0.02:
+            # 🚀 动态 ATR 容差：1.5 倍 ATR%，限制在 [1%, 4%]
+            tolerance = 0.02  # 兜底默认值
+            if atr and price and price > 0:
+                atr_pct = atr / price
+                tolerance = max(0.01, min(atr_pct * 1.5, 0.04))
+
+            if boll_mid and abs(price - boll_mid) / boll_mid <= tolerance:
                 result["track_4"]["score"] += 1
-                result["track_4"]["details"]["1.回踩1H布林中轨"] = f"✅ 现价{price:.4f}，中轨{boll_mid:.4f}"
+                result["track_4"]["details"]["1.回踩1H布林中轨"] = (
+                    f"✅ 现价{price:.4f}，中轨{boll_mid:.4f}，容差±{tolerance*100:.1f}%"
+                )
             else:
                 boll_mid_str = f"{boll_mid:.4f}" if boll_mid else "N/A"
-                result["track_4"]["details"]["1.回踩1H布林中轨"] = f"❌ 距中轨{boll_mid_str}较远"
+                result["track_4"]["details"]["1.回踩1H布林中轨"] = (
+                    f"❌ 距中轨{boll_mid_str}较远（当前容差±{tolerance*100:.1f}%）"
+                )
 
             if klines and len(klines) >= 6:
                 avg_vol = sum(k["volume"] for k in klines[-6:-1]) / 5
@@ -552,7 +626,7 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_4"]["details"]["6.4H MACD健康"] = "❌ 4H MACD已死叉"
 
-        # ================= 🚀 最终裁决（带冲突检测） =================
+        # ================= 最终裁决（带冲突检测） =================
         candidates = []
 
         if result["track_2"]["hard_ok"] and result["track_2"].get("sub_type"):
@@ -568,7 +642,7 @@ class V1DefaultStrategy(BaseStrategy):
             candidates.append(("long_trend", "track_1", result["track_1"]["score"], f"底部突破 {result['track_1']['score']}/6"))
 
         if candidates:
-            # 🚀 优先级：做空 > 趋势回踩 > 暴跌反弹 > 底部突破
+            # 优先级：做空 > 趋势回踩 > 暴跌反弹 > 底部突破
             priority_order = {"short": 4, "long_pullback": 3, "long_rebound": 2, "long_trend": 1}
             candidates.sort(key=lambda x: (priority_order.get(x[0], 0), x[2]), reverse=True)
 
@@ -577,18 +651,21 @@ class V1DefaultStrategy(BaseStrategy):
             result["direction"] = winner_dir
             result["reason"] = winner_reason
 
-            # 记录冲突
             if len(candidates) > 1:
                 losers = [f"{c[1]}({c[3]})" for c in candidates[1:]]
                 result["conflict_note"] = f"⚠️ 多轨道冲突！优先选择 [{winner_track}]，被否决：{', '.join(losers)}"
 
-            # 生成入场计划
-            trigger_type_map = {"short": "short_trend_follow" if result["track_2"]["sub_type"] == "trend_follow" else "short_reversal",
-                                "long_pullback": "long_pullback",
-                                "long_rebound": "long_rebound",
-                                "long_trend": "long_trend"}
+            trigger_type_map = {
+                "short": "short_trend_follow" if result["track_2"]["sub_type"] == "trend_follow" else "short_reversal",
+                "long_pullback": "long_pullback",
+                "long_rebound": "long_rebound",
+                "long_trend": "long_trend"
+            }
             tt = trigger_type_map.get(winner_dir, "long_trend")
-            result["entry_plan"] = self._build_entry_plan(winner_dir, price, atr, rh, rl, ma10, boll_mid, tt)
+            # 🚀 传入 symbol 用于分层 ATR 止损倍数
+            result["entry_plan"] = self._build_entry_plan(
+                symbol, winner_dir, price, atr, rh, rl, ma10, boll_mid, tt
+            )
 
             if is_spot_mode and winner_dir == "short":
                 result["direction"] = "spot_warning"
