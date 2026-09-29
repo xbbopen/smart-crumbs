@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-邮件发送模块。
+邮件发送模块（增强版）。
 
-重要：
-- Gmail 在重置主密码后会自动撤销所有"应用专用密码"，
-  此时 SMTP 登录会返回 535 认证失败。
-- 本模块在失败时**抛出异常**，确保 GitHub Actions 能捕捉到并标红，
-  避免出现"邮件没发出去但 job 显示成功"的情况。
+改进点：
+1. 加入自动重试（默认 3 次），每次间隔递增。
+2. 支持 Gmail 双端口降级：587 STARTTLS → 465 SSL。
+3. 针对不同异常给出明确提示（网络超时 / 535 认证 / 收件人被拒）。
+4. 密码自动去掉空格（Gmail 应用密码复制常见坑）。
+5. 失败时抛出异常，确保 GitHub Actions 明确标红。
 """
 import os
+import time
 import smtplib
 import ssl
 from email.mime.text import MIMEText
@@ -23,67 +25,101 @@ def _require_env(name: str) -> str:
     return val
 
 
-def send_html_email(subject: str, html: str) -> None:
-    """
-    发送 HTML 邮件。
-    成功：正常返回；失败：抛出异常（并打印明确原因）。
-    """
-    # 标题去掉换行，避免 Header 报错
-    subject = subject.replace('\n', ' ').replace('\r', '').strip()
-
-    smtp_server = _require_env("SMTP_SERVER")
-    smtp_port = int(_require_env("SMTP_PORT"))
-    smtp_user = _require_env("SMTP_USERNAME")
-    smtp_pass = _require_env("SMTP_PASSWORD")
-    recipient = _require_env("RECIPIENT_EMAIL")
-
-    # Gmail 应用专用密码是 16 位，复制时经常带空格，这里兜底清理
-    smtp_pass = smtp_pass.replace(" ", "")
-
+def _build_message(subject: str, html: str, smtp_user: str, recipient: str) -> MIMEMultipart:
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = Header(subject, 'utf-8')
+    msg['Subject'] = Header(subject.replace('\n', ' ').replace('\r', '').strip(), 'utf-8')
     msg['From'] = smtp_user
     msg['To'] = recipient
     msg.attach(MIMEText(html, 'html', 'utf-8'))
+    return msg
 
-    context = ssl.create_default_context()
 
-    try:
-        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+def _send_once(host: str, port: int, use_ssl: bool,
+               user: str, password: str, recipient: str,
+               msg: MIMEMultipart, timeout: int = 30) -> None:
+    """单次尝试发送。失败抛异常，成功正常返回。"""
+    if use_ssl:
+        # 465：直接 SSL 包装
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(host, port, timeout=timeout, context=context) as server:
+            server.login(user, password)
+            server.sendmail(user, [recipient], msg.as_string())
+    else:
+        # 587：先明文连接，再 STARTTLS 升级
+        context = ssl.create_default_context()
+        with smtplib.SMTP(host, port, timeout=timeout) as server:
             server.ehlo()
             server.starttls(context=context)
             server.ehlo()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, [recipient], msg.as_string())
-        print(f"[email] ✅ 发送成功 → {recipient}")
+            server.login(user, password)
+            server.sendmail(user, [recipient], msg.as_string())
 
-    except smtplib.SMTPAuthenticationError as e:
-        # Gmail 密码重置后最常见的错误
-        print("[email] ❌ 认证失败（535）。")
-        print("[email] 常见原因：Gmail 主密码重置后，应用专用密码被 Google 自动撤销。")
-        print("[email] 解决：")
-        print("[email]   1. 打开 https://myaccount.google.com/apppasswords")
-        print("[email]   2. 生成新的 16 位应用专用密码")
-        print("[email]   3. 更新 GitHub Secrets 中的 SMTP_PASSWORD（不带空格）")
-        print(f"[email] 原始错误：{e}")
-        raise
 
-    except smtplib.SMTPRecipientsRefused as e:
-        print(f"[email] ❌ 收件人被拒绝（检查 RECIPIENT_EMAIL）：{e}")
-        raise
+def send_html_email(subject: str, html: str, max_retries: int = 3) -> None:
+    """
+    发送 HTML 邮件。
+    策略：
+      - 每轮先尝试 587（STARTTLS），失败切 465（SSL）。
+      - 整个流程最多循环 max_retries 次，每次间隔递增（2s / 4s / 8s）。
+      - 若遇 535 认证失败，直接终止重试（密码问题重试无用）。
+    """
+    smtp_server = _require_env("SMTP_SERVER")
+    smtp_port = int(_require_env("SMTP_PORT"))
+    smtp_user = _require_env("SMTP_USERNAME")
+    smtp_pass = _require_env("SMTP_PASSWORD").replace(" ", "")
+    recipient = _require_env("RECIPIENT_EMAIL")
 
-    except smtplib.SMTPServerDisconnected as e:
-        print(f"[email] ❌ SMTP 服务器主动断开（网络或端口问题）：{e}")
-        raise
+    msg = _build_message(subject, html, smtp_user, recipient)
 
-    except smtplib.SMTPException as e:
-        print(f"[email] ❌ SMTP 异常：{e}")
-        raise
+    # 端口候选：优先用户配置的端口，另一个作为降级
+    port_candidates = []
+    if smtp_port == 465:
+        port_candidates = [(465, True), (587, False)]
+    else:
+        port_candidates = [(587, False), (465, True)]
 
-    except OSError as e:
-        print(f"[email] ❌ 网络/IO 异常：{e}")
-        raise
+    last_error: Exception | None = None
 
-    except Exception as e:
-        print(f"[email] ❌ 未知异常：{e}")
-        raise
+    for attempt in range(1, max_retries + 1):
+        for port, use_ssl in port_candidates:
+            label = "SSL" if use_ssl else "STARTTLS"
+            try:
+                print(f"[email] 第 {attempt}/{max_retries} 次尝试：{smtp_server}:{port}（{label}）")
+                _send_once(smtp_server, port, use_ssl,
+                           smtp_user, smtp_pass, recipient, msg)
+                print(f"[email] ✅ 发送成功 → {recipient}")
+                return
+            except smtplib.SMTPAuthenticationError as e:
+                # 535 —— 密码错误，重试和换端口都没意义
+                print("[email] ❌ 认证失败（535）。")
+                print("[email] 原因：Gmail 主密码重置后，应用专用密码被自动撤销。")
+                print("[email] 解决：")
+                print("[email]   1. 打开 https://myaccount.google.com/apppasswords")
+                print("[email]   2. 生成新的 16 位应用专用密码")
+                print("[email]   3. 更新 GitHub Secrets 中的 SMTP_PASSWORD（不带空格）")
+                print(f"[email] 原始错误：{e}")
+                raise
+            except (smtplib.SMTPServerDisconnected,
+                    smtplib.SMTPConnectError,
+                    TimeoutError,
+                    OSError) as e:
+                # 网络类错误 —— 换下一个端口 / 下一次重试
+                print(f"[email] ⚠️  {smtp_server}:{port} 网络异常：{e}")
+                last_error = e
+                continue
+            except smtplib.SMTPRecipientsRefused as e:
+                print(f"[email] ❌ 收件人被拒绝（检查 RECIPIENT_EMAIL）：{e}")
+                raise
+            except smtplib.SMTPException as e:
+                print(f"[email] ⚠️  {smtp_server}:{port} SMTP 异常：{e}")
+                last_error = e
+                continue
+
+        # 每轮重试之间等待，避免瞬间连打
+        if attempt < max_retries:
+            wait = 2 ** attempt
+            print(f"[email] 本轮所有端口均失败，等待 {wait}s 后重试...")
+            time.sleep(wait)
+
+    print(f"[email] ❌ 已重试 {max_retries} 轮，全部失败。最后一次错误：{last_error}")
+    raise RuntimeError(f"邮件发送失败（已重试 {max_retries} 轮）：{last_error}")
