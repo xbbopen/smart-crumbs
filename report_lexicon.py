@@ -35,6 +35,7 @@ REGIME_MAP = {
     "ranging": "⚪ 震荡整理",
     "weak_bear": "🔴 弱空头",
     "strong_bear": "🔴🔴 强空头趋势",
+    "momentum_stall": "⏸️ 动量停滞",   # 🚀 新增这一行
     "error": "❗ 策略异常",
 }
 
