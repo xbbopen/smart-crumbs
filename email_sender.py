@@ -24,5 +24,12 @@ def send_html_email(subject, html):
         server.sendmail(smtp_user, [recipient], msg.as_string())
         server.quit()
         print("[email] 发送成功")
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[email] ❌ 认证失败（535）— 请检查 SMTP_PASSWORD 是否为最新的应用专用密码: {e}")
+    raise  # 抛出异常让 GitHub Actions 标记为失败
+    except smtplib.SMTPException as e:
+        print(f"[email] ❌ SMTP 错误: {e}")
+    raise
     except Exception as e:
-        print(f"[email] 发送失败: {e}")
+        print(f"[email] ❌ 发送失败: {e}")
+    raise
