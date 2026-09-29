@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from strategies.loader import load_strategy
 from data_fetcher import build_market_data, audit_watchlist
 from report_builder import build_report
+from market_scanner import scan_market
 from email_sender import send_html_email
 
 logging.basicConfig(
@@ -139,7 +140,13 @@ def main():
 
     email_ok = True
     if any_triggered or notify:
-        subject, html = build_report(all_results, active_strategies, watchlist)
+        # 🚀 扫描市场热点（内部已兜底，不会抛异常）
+        try:
+            hotspot = scan_market(all_results)
+        except Exception as e:
+            log.error(f"[hotspot] 扫描异常（已降级）：{type(e).__name__}: {e}")
+            hotspot = None
+        subject, html = build_report(all_results, active_strategies, watchlist, hotspot=hotspot)
         try:
             send_html_email(subject, html)
         except Exception as e:
