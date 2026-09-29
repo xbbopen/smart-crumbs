@@ -8,7 +8,7 @@
 4. 入场价使用 entry_plan 的加权均价
 5. S/A/B/C/D 五级评级 + 按方向统计
 """
-import json, time, argparse, os, math
+import json, time, argparse, os, math, sys
 import bisect
 from datetime import datetime, timezone, timedelta
 from strategies.loader import load_strategy
@@ -547,13 +547,21 @@ def main():
 
     if not all_reports:
         print("\n❌ 无有效回测结果")
-        return
+        sys.exit(1)
 
     html = build_backtest_html(all_reports, strategies, symbols, period_desc)
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     subject = f"【参谋长回测】{now} | {len(all_reports)}个标的"
-    send_html_email(subject, html)
-    print("\n📧 回测报告已发送")
+
+    # 🚀 邮件失败必须抛出，让 GitHub Actions 明确标红
+    try:
+        send_html_email(subject, html)
+        print("\n📧 回测报告已发送")
+    except Exception as e:
+        print(f"\n❌ 邮件发送失败：{e}")
+        print("提示：Gmail 主密码重置会导致应用专用密码被撤销，")
+        print("      请重新生成 16 位应用密码并更新 SMTP_PASSWORD。")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
