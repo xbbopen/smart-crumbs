@@ -1,12 +1,18 @@
+# -*- coding: utf-8 -*-
 import json, time, logging, sys, os
 from datetime import datetime, timezone, timedelta
+
 from strategies.loader import load_strategy
 from data_fetcher import build_market_data, audit_watchlist
 from report_builder import build_report
 from email_sender import send_html_email
 
 # ================= 日志配置 =================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 log = logging.getLogger(__name__)
 BJT = timezone(timedelta(hours=8))
 
@@ -52,7 +58,10 @@ def main():
         time.sleep(1.0)
 
         if status != "ok":
-            all_results.append({"symbol": sym, "asset_type": typ, "status": status, "strategy_results": {}})
+            all_results.append({
+                "symbol": sym, "asset_type": typ,
+                "status": status, "strategy_results": {}
+            })
             continue
 
         srs = {}
@@ -70,26 +79,51 @@ def main():
             "strategy_results": srs
         })
 
-    # ============ 第四步：发送邮件 ============
-    any_triggered = any(sr and sr.get("triggered") for r in all_results for sr in r.get("strategy_results", {}).values())
+    # ============ 第四步：先写信号日志（无论邮件是否成功都不丢） ============
+    write_signal_log(all_results)
 
+    # ============ 第五步：再发邮件 ============
+    any_triggered = any(
+        sr and sr.get("triggered")
+        for r in all_results
+        for sr in r.get("strategy_results", {}).values()
+    )
+
+    email_ok = True
     if any_triggered or notify:
         subject, html = build_report(all_results, active_strategies, watchlist)
-        send_html_email(subject, html)
+        try:
+            send_html_email(subject, html)
+        except Exception as e:
+            email_ok = False
+            log.error("=" * 60)
+            log.error(f"❌ 邮件发送失败：{e}")
+            log.error("常见原因：Gmail 主密码重置后，应用专用密码被自动撤销。")
+            log.error("解决步骤：")
+            log.error("  1. 打开 https://myaccount.google.com/apppasswords")
+            log.error("  2. 生成新的 16 位应用专用密码")
+            log.error("  3. 更新 GitHub Secrets 中的 SMTP_PASSWORD")
+            log.error("=" * 60)
     else:
         log.info("无信号且 notify_on_no_signal=False，静默退出")
 
-    write_signal_log(all_results)
-
-    # ============ 第五步：汇总输出 ============
+    # ============ 第六步：汇总输出 ============
     log.info("\n" + "=" * 60)
     log.info("📊 本次运行汇总")
     log.info("=" * 60)
     ok_count = sum(1 for r in all_results if r["status"] == "ok")
-    triggered_count = sum(1 for r in all_results if any(sr and sr.get("triggered") for sr in r.get("strategy_results", {}).values()))
+    triggered_count = sum(
+        1 for r in all_results
+        if any(sr and sr.get("triggered") for sr in r.get("strategy_results", {}).values())
+    )
     log.info(f"✅ 成功获取: {ok_count}/{len(all_results)}")
     log.info(f"🚨 触发信号: {triggered_count}")
+    log.info(f"📧 邮件发送: {'成功' if email_ok else '失败'}")
     log.info("=" * 60)
+
+    # 邮件失败时让 job 明确标红，避免"静默成功"
+    if not email_ok:
+        sys.exit(1)
 
 
 def write_signal_log(results):
