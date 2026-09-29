@@ -135,3 +135,18 @@ def list_symbols():
         return [r[0] for r in cur.fetchall()]
     finally:
         conn.close()
+
+def vacuum_db():
+    """
+    压缩数据库，返回 (before_mb, after_mb)。
+    消除多处内联 VACUUM 带来的代码重复。
+    """
+    before = db_size_mb()
+    conn = get_conn()
+    try:
+        conn.execute("VACUUM")
+        conn.commit()
+    finally:
+        conn.close()
+    after = db_size_mb()
+    return before, after
