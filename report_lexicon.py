@@ -4,6 +4,7 @@
 本模块只提供纯数据与纯函数，不引入任何副作用，方便单测和复用。
 """
 import random
+import re
 
 # ============================================================
 # 一、词典（英文 → 中文）
@@ -35,7 +36,7 @@ REGIME_MAP = {
     "ranging": "⚪ 震荡整理",
     "weak_bear": "🔴 弱空头",
     "strong_bear": "🔴🔴 强空头趋势",
-    "momentum_stall": "⏸️ 动量停滞",   # 🚀 新增这一行
+    "momentum_stall": "⏸️ 动量停滞",
     "error": "❗ 策略异常",
 }
 
@@ -67,7 +68,6 @@ SESSION_MAP = {
 
 
 def judge_session(hour_bjt: int) -> str:
-    """根据北京时间的小时数返回时段 key。"""
     if 0 <= hour_bjt < 9:
         return "late_night"
     if 9 <= hour_bjt < 12:
@@ -80,10 +80,107 @@ def judge_session(hour_bjt: int) -> str:
 
 
 # ============================================================
-# 二、标题话术池（每个标题必带"参谋长"/"牛来参谋长" IP 锚）
+# 二、值翻译函数（供 v1_default.py 使用）
 # ============================================================
-# 占位符：{session} {sym} {syms} {n} {rsi} {rsi_1h} {fr} {fp} {adx} {kdj_j} {pct} {rh}
-# {long_syms} {short_syms} {drawdown}
+def trend_cn(t):
+    """up / down / neutral → 中文。"""
+    return {
+        "up": "多头",
+        "down": "空头",
+        "neutral": "震荡",
+        None: "未知",
+    }.get(t, str(t) if t else "未知")
+
+
+def momentum_cn(m):
+    """4H 动能值 → 中文。"""
+    return {
+        "strong_bull": "强势多头",
+        "bull": "温和多头",
+        "neutral": "中性震荡",
+        "bear": "温和空头",
+        "strong_bear": "强势空头",
+        None: "未知",
+    }.get(m, str(m) if m else "未知")
+
+
+def regime_cn(r):
+    """市场状态 → 中文。"""
+    return {
+        "strong_bull": "强多头",
+        "weak_bull": "弱多头",
+        "weak_bull_warning": "弱多头警告",
+        "ranging": "震荡整理",
+        "weak_bear": "弱空头",
+        "strong_bear": "强空头",
+        "momentum_stall": "动量停滞",
+        "error": "策略异常",
+        None: "未知",
+    }.get(r, str(r) if r else "未知")
+
+
+def sub_type_cn(s):
+    """track_2 子类型 → 中文。"""
+    return {
+        "reversal": "见顶反转",
+        "trend_follow": "顺势延续",
+        None: "未知",
+    }.get(s, str(s) if s else "未知")
+
+
+# ============================================================
+# 三、通用兜底 sanitize（对任意文本做英文→中文替换）
+# ============================================================
+_SANITIZE_PAIRS = [
+    # 按长度降序，长词先替换，避免子串误伤
+    ("strong_bull", "强势多头"),
+    ("strong_bear", "强势空头"),
+    ("weak_bull_warning", "弱多头警告"),
+    ("weak_bull", "弱多头"),
+    ("weak_bear", "弱空头"),
+    ("momentum_stall", "动量停滞"),
+    ("trend_follow", "顺势"),
+    ("reversal", "反转"),
+    ("spot_warning", "现货逃顶"),
+    ("long_pullback", "趋势回踩"),
+    ("long_rebound", "暴跌反弹"),
+    ("long_trend", "底部突破"),
+    ("binance_spot", "币安现货"),
+    ("gate_spot", "Gate现货"),
+    ("bearish", "顶背离"),
+    ("bullish", "底背离"),
+    ("neutral", "震荡"),
+    ("bull", "多头"),
+    ("bear", "空头"),
+    ("ranging", "震荡"),
+    ("error", "异常"),
+    ("track_4", "趋势回踩"),
+    ("track_3", "暴跌反弹"),
+    ("track_2", "做空"),
+    ("track_1", "底部突破"),
+    ("spot", "现货"),
+    ("futures", "合约"),
+    ("long", "做多"),
+    ("short", "做空"),
+    ("up", "上涨"),
+    ("down", "下跌"),
+]
+
+
+def sanitize_text(text):
+    """对任意字符串做英文→中文兜底替换，防止英文暴露。"""
+    if text is None:
+        return text
+    result = str(text)
+    for en, cn in _SANITIZE_PAIRS:
+        pattern = r'\b' + re.escape(en) + r'\b'
+        result = re.sub(pattern, cn, result)
+    return result
+
+
+# ============================================================
+# 四、标题话术池
+# ============================================================
 SUBJECT_POOL = {
     "single_trigger_long": [
         "🐮 参谋长战报：{session} {sym} 异动！30m RSI {rsi}，子弹已上膛",
@@ -159,11 +256,9 @@ SUBJECT_POOL = {
 
 
 # ============================================================
-# 三、参谋长解读话术池（每类 ≥ 8 条）
+# 五、参谋长解读话术池
 # ============================================================
-# 占位符：{sym} {rsi} {rsi_1h} {kdj_j} {adx} {fr} {fp} {rh} {rl} {mid} {ma10} {drawdown}
 COMMENT_POOL = {
-    # ---------- 做多 ----------
     "long_rebound": [
         "带血的筹码满地都是！{sym} RSI 砸到 {rsi}，1H RSI={rsi_1h} 也在超卖区。主力吸筹痕迹藏不住了。",
         "别人恐慌我贪婪。{sym} 从高点回撤 {drawdown}%，CVD 已率先底背离，参谋长子弹已上膛。",
@@ -194,7 +289,6 @@ COMMENT_POOL = {
         "大方向没变，短期回调是礼物。{sym} 布林中轨支撑有效。",
         "{sym} 1D+4H 双多头，回踩 1H 布林中轨。主力给你最后一次上车机会。",
     ],
-    # ---------- 做空 ----------
     "short_reversal": [
         "{sym} 资金费率飙到 {fr}%，全市场拥挤度 {fp}。主力要割的就是这种 FOMO 多头。",
         "RSI {rsi}，1H RSI={rsi_1h}。技术面亮红灯，{sym} 冲高回落只差导火索。",
@@ -215,7 +309,6 @@ COMMENT_POOL = {
         "{sym} 中期下跌趋势明确，反弹到布林中轨附近遇阻。",
         "空头趋势中，反弹不是反转。{sym} 阻力位一到，空单直接挂。",
     ],
-    # ---------- 现货逃顶 ----------
     "spot_warning": [
         "警报！{sym} 现货模式出现逃顶信号！RSI={rsi}，价格逼近前高。逐步止盈。",
         "{sym} 各项见顶指标共振，现货无法做空，建议减仓保住利润。",
@@ -224,7 +317,6 @@ COMMENT_POOL = {
         "逃顶信号已现。{sym} 资金费率 {fr}，多头拥挤。现货别贪最后一口。",
         "{sym} 逼近前高 {rh}，1H 超买。现货玩家该考虑跑路了。",
     ],
-    # ---------- 未触发，但情绪极端 ----------
     "no_trigger_greedy": [
         "全市场都在狂欢，{sym} 也不例外。但参谋长提醒：越是这种时候越要盯紧费率。",
         "{sym} 现在 RSI={rsi}，快到见顶区。别被 FOMO 冲昏头，等它的做空信号。",
@@ -259,7 +351,7 @@ COMMENT_POOL = {
 
 
 # ============================================================
-# 四、热点描述话术池
+# 六、热点描述话术池
 # ============================================================
 HOTSPOT_POOL = {
     "top_gainer": [
@@ -306,9 +398,72 @@ HOTSPOT_POOL = {
 
 
 # ============================================================
-# 五、工具函数
+# 七、轨道 ID 中文映射
 # ============================================================
-def fill(template: str, **kwargs) -> str:
+TRACK_ID_TO_CN = {
+    "track_1": "底部突破",
+    "track_2": "做空",
+    "track_3": "暴跌反弹",
+    "track_4": "趋势回踩",
+}
+
+
+def translate_track_ids(text):
+    """把字符串里的 track_1 / track_2 等 ID 替换成中文名。"""
+    if not text:
+        return text
+    for tid in sorted(TRACK_ID_TO_CN.keys(), key=len, reverse=True):
+        text = str(text).replace(tid, TRACK_ID_TO_CN[tid])
+    return text
+
+
+# ============================================================
+# 八、智能提示（与参谋长解读一致，避免自相矛盾）
+# ============================================================
+def build_smart_tips(md, regime):
+    """
+    基于市场状态生成面板提示，确保与参谋长解读方向一致。
+    """
+    tips = []
+
+    regime_tip = {
+        "momentum_stall":   "⏸️ 动量停滞，主力按兵不动，观望为宜",
+        "strong_bull":      "🟢🟢 1D+4H双多头，回调即机会",
+        "weak_bull":        "🟢 1D多头但4H震荡，只做回踩或见顶",
+        "weak_bull_warning":"🚨 1D多头但4H已转空，谨防做多陷阱",
+        "ranging":          "⚪ 无明确趋势，区间操作，快进快出",
+        "weak_bear":        "🔴 1D空头，反弹即做空机会",
+        "strong_bear":      "🔴🔴 1D+4H双空头，反弹即陷阱",
+        "error":            "❗ 策略异常，本轮仅供参考",
+    }.get(regime, "⚪ 状态未知，观望")
+    tips.append(regime_tip)
+
+    rsi_1h = md.get("rsi_1h")
+    adx = md.get("adx")
+    fp = md.get("funding_percentile")
+
+    if rsi_1h is not None:
+        if rsi_1h > 70:
+            tips.append(f"1H RSI {rsi_1h:.1f} 已超买")
+        elif rsi_1h < 35:
+            tips.append(f"1H RSI {rsi_1h:.1f} 已超卖")
+
+    if adx is not None:
+        if adx < 18:
+            tips.append(f"ADX {adx:.1f} 低位，趋势弱")
+        elif adx > 25:
+            tips.append(f"ADX {adx:.1f} 趋势强")
+
+    if fp is not None and fp > 0.7:
+        tips.append(f"费率拥挤度 {fp:.0%} 偏高")
+
+    return tips
+
+
+# ============================================================
+# 九、工具函数
+# ============================================================
+def fill(template, **kwargs):
     """安全填充占位符。缺失字段时保留原样，不抛异常。"""
     try:
         return template.format(**kwargs)
@@ -317,10 +472,6 @@ def fill(template: str, **kwargs) -> str:
 
 
 def pick_unique(pool, history, k=1):
-    """
-    从 pool 里随机抽取 k 条，尽量避开 history 里已有的。
-    history 里存的是"已用过的模板原文"，避免同一模板短期内复用。
-    """
     if not pool:
         return []
     candidates = list(pool)
@@ -331,12 +482,10 @@ def pick_unique(pool, history, k=1):
             picked.append(c)
             if len(picked) >= k:
                 return picked
-    # 都撞历史了，兜底返回随机
     while len(picked) < k:
         picked.append(random.choice(pool))
     return picked
 
 
 def pick_one(pool):
-    """从池中随机取一条。空池返回空字符串。"""
     return random.choice(pool) if pool else ""
