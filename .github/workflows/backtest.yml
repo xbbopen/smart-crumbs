@@ -3,30 +3,47 @@ name: 历史回测
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: '模式：custom=指定标的, universe=全市场扫描'
+        required: false
+        default: 'custom'
       strategies:
-        description: '策略名（空格分隔，如：v1_default）'
+        description: '策略名（空格分隔）'
         required: false
         default: 'v1_default'
       symbols:
-        description: '标的（空格分隔，如：BTC ETH SOL）'
+        description: '标的（custom 模式用，空格分隔，如：BTC ETH SOL）'
         required: false
         default: 'BTC ETH SOL'
+      exclude:
+        description: 'universe 模式排除的标的（空格分隔）'
+        required: false
+        default: ''
+      max_symbols:
+        description: 'universe 模式最多测试标的数'
+        required: false
+        default: '150'
+      min_days:
+        description: 'universe 模式最低上线天数（默认90天）'
+        required: false
+        default: '90'
       start_date:
-        description: '开始日期 YYYY-MM-DD（留空则从头回测）'
+        description: '开始日期 YYYY-MM-DD（留空=全量）'
         required: false
         default: ''
       end_date:
-        description: '结束日期 YYYY-MM-DD（留空则到最新）'
+        description: '结束日期 YYYY-MM-DD（留空=至今）'
         required: false
         default: ''
       asset_type:
-        description: '标的类型：futures 或 spot'
+        description: 'futures 或 spot'
         required: false
         default: 'futures'
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +51,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 🚀 从 Cache 恢复数据库（回测需要读取历史K线）
       - name: 恢复数据库
         uses: actions/cache@v4
         with:
@@ -48,8 +64,12 @@ jobs:
       - name: 运行回测
         run: |
           python backtest.py \
+            --mode ${{ github.event.inputs.mode }} \
             --strategies ${{ github.event.inputs.strategies }} \
             --symbols ${{ github.event.inputs.symbols }} \
+            --exclude "${{ github.event.inputs.exclude }}" \
+            --max_symbols ${{ github.event.inputs.max_symbols }} \
+            --min_days ${{ github.event.inputs.min_days }} \
             --start_date "${{ github.event.inputs.start_date }}" \
             --end_date "${{ github.event.inputs.end_date }}" \
             --asset_type ${{ github.event.inputs.asset_type }}
@@ -59,3 +79,9 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+
+      - name: 保存数据库到 Cache
+        uses: actions/cache@v4
+        with:
+          path: data/market.db
+          key: market-db-${{ github.run_id }}
