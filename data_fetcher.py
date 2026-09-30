@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 统一数据获取模块（DB优先 + 增量 + 源切换保护 + 从最近N根探测）
 """
@@ -235,7 +236,8 @@ def fetch_hyperliquid_metrics(symbol, current_price):
 
 
 # ================= 🚀 从"最近N根"开始试探 =================
-_PROBE_SIZES = [50, 100, 200, 300, 500, 1000]
+# 扩展探测粒度，覆盖 4H/1D 的 2000+ 目标
+_PROBE_SIZES = [50, 100, 200, 300, 500, 1000, 2000, 3000]
 
 def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
@@ -277,8 +279,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
 
     primary_source = get_primary_source(symbol, asset_type)
 
-    # 🚀 核心修复：查DB里所有来源的最新时间戳，不再按主源过滤
-    # 因为 Q_USDT 的主源可能是 binance_spot，但实际数据来自 gate_spot
     last_ts = get_last_timestamp(symbol, interval, source=None)
 
     actual_source = primary_source
@@ -289,7 +289,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
         if fetch_start >= now_ms:
             log.info(f"[{symbol}][{interval}] 数据已最新")
         else:
-            # 增量拉取（走瀑布式降级）
             if primary_source == "hyperliquid":
                 klines_new, _ = fetch_hyperliquid_klines(symbol, interval, 5000, fetch_start, now_ms)
                 if klines_new: actual_source = "hyperliquid"
@@ -300,7 +299,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
                 klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
                 if klines_new: actual_source = "gate_spot"
     else:
-        # 首次运行：从最近N根探测
         log.warning(f"[{symbol}][{interval}] DB无数据，从最近N根探测")
         if primary_source == "hyperliquid":
             klines_new = fetch_klines_from_now(fetch_hyperliquid_klines, symbol, interval, desired_bars)
@@ -315,7 +313,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     if klines_new:
         upsert_klines(symbol, interval, klines_new, source=actual_source)
 
-    # 读取时也不按主源过滤，直接读全部数据
     klines_all = load_klines(symbol, interval, desired_bars, source=None)
     if len(klines_all) >= 50:
         return klines_all, {
@@ -506,7 +503,23 @@ def build_market_data(symbol, asset_type):
     klines_1h = aggregate_klines(klines_30m, 2)
     if not klines_4h:
         klines_4h = aggregate_klines(klines_30m, 8)
-    klines_1d = aggregate_klines(klines_4h, 6)
+
+    # 🚀 1D K线：优先直接从数据源拉取，避免因 4H 数据不足导致日线指标全空
+    klines_1d = []
+    try:
+        klines_1d_direct, _ = fetch_and_cache_klines(symbol, asset_type, "1d", 400)
+        if klines_1d_direct:
+            klines_1d = klines_1d_direct
+            log.info(f"[{symbol}][1d] 直接拉取成功，共 {len(klines_1d)} 根")
+    except Exception as e:
+        log.warning(f"[{symbol}][1d] 直接拉取失败（将降级从4H聚合）：{type(e).__name__}: {e}")
+
+    # 兜底：1D 数据不足 50 根时，从 4H 聚合
+    if len(klines_1d) < 50:
+        klines_1d_agg = aggregate_klines(klines_4h, 6)
+        if len(klines_1d_agg) > len(klines_1d):
+            klines_1d = klines_1d_agg
+            log.info(f"[{symbol}][1d] 使用4H聚合兜底，共 {len(klines_1d)} 根")
 
     md["klines_30m"] = klines_30m
     md["klines_1h"] = klines_1h
