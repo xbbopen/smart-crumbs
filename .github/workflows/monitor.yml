@@ -1,8 +1,7 @@
 name: 多标的的合约监控
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
+
   workflow_dispatch:
 
 concurrency:
