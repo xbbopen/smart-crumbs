@@ -237,7 +237,7 @@ def fetch_hyperliquid_metrics(symbol, current_price):
 
 # ================= 🚀 从"最近N根"开始试探 =================
 # 扩展探测粒度，覆盖 4H/1D 的 2000+ 目标
-_PROBE_SIZES = [50, 100, 200, 300, 500, 1000, 2000, 3000，5000]
+_PROBE_SIZES = [50, 100, 200, 300, 500, 1000, 2000, 3000, 5000]
 
 def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
