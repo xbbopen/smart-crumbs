@@ -9,6 +9,7 @@ from report_lexicon import (
     SUB_TYPE_MAP, DATA_MODE_MAP, TRACK_NAME_MAP, SESSION_MAP,
     SUBJECT_POOL, COMMENT_POOL, HOTSPOT_POOL,
     fill, pick_unique, pick_one,
+    translate_track_ids, build_smart_tips,
 )
 
 BJT = timezone(timedelta(hours=8))
@@ -72,7 +73,6 @@ def _pick_unique_subject(pool):
             history.append(candidate)
             _save_subject_history(history)
             return candidate
-    # 兜底：允许重复
     candidate = random.choice(pool)
     history.append(candidate)
     _save_subject_history(history)
@@ -93,7 +93,7 @@ CONDITION_EXPLANATIONS = {
     "A1.逼近高点": "价格是否已推到散户狂欢的悬崖边",
     "A2.30m RSI超买": "30m是否极度狂热",
     "A3.30m CVD顶背离": "量价背离，主力暗中出货",
-    "A4.1H RSI超买或顶背离": "1H是否极度狂热或出现顶背离",
+    "A4.1H RSI超买 / 顶背离 / 费率极端": "1H是否极度狂热、顶背离或费率拥挤",
     "A5.1H KDJ超买": "1H短期是否过热",
     "A6.4H MACD死叉": "4H动量是否转空",
     "B1.4H空头结构": "4H EMA20 < EMA50，中期空头结构",
@@ -108,7 +108,7 @@ CONDITION_EXPLANATIONS = {
     "4.1H RSI超卖或底背离": "1H是否极度恐慌或出现底背离",
     "5.1H KDJ超卖": "1H抛压耗尽",
     "6.30m止跌形态": "出现锤头线或看涨吞没",
-    "1.回踩1H布林中轨": "价格回踩到1H布林中轨附近（±2%）",
+    "1.回踩1H布林中轨": "价格回踩到1H布林中轨附近（动态 ATR 容差）",
     "2.缩量回踩": "回踩时成交量萎缩（卖压衰竭）",
     "3.30m止跌形态": "出现止跌K线",
     "4.1H RSI健康": "1H RSI在40-55之间",
@@ -119,13 +119,14 @@ CONDITION_EXPLANATIONS = {
 SIGNAL_GLOSSARY = {
     "多周期共振": "1D定大方向，4H定中期趋势，1H找入场时机，30m精确扣扳机。",
     "分档入场": "根据不同轨道的性质，把仓位拆成2-3档，避免一次性满仓。",
-    "ADX": "趋势强度。轨道1/2要求≥20，轨道3放宽到≥12。",
+    "ADX": "趋势强度。轨道1要求≥22，轨道2要求≥20，轨道4要求≥18，轨道3放宽到≥12。",
     "CVD": "累积成交量差。价格新高但CVD未新高=买盘衰竭（顶背离）。",
     "RSI背离": "价格新高但RSI未新高=顶背离；价格新低但RSI未新低=底背离。",
     "资金费率": "Hyperliquid每小时结算，正常0.001%-0.003%，0.005%以上警告，0.01%以上极端。",
     "KDJ": "J值<0超卖，>100超买，适合捕捉短期极端。",
     "布林中轨": "1H的MA20，趋势回踩的经典支撑位。",
     "ATR": "波动幅度，用于止损和仓位计算。",
+    "动量停滞": "MACD柱归零 + ADX低位，主力按兵不动，多数轨道不宜出手。",
 }
 
 AD_BANNER = """
@@ -140,7 +141,25 @@ AD_BANNER = """
 # ============================================================
 # 四、多周期面板
 # ============================================================
-def render_multi_tf_panel(md):
+def _fmt_data_range(klines, period_label):
+    """格式化 K 线区间：N根（起始 ~ 结束），时间为北京时间。"""
+    if not klines:
+        return f"{period_label} N/A"
+    try:
+        start_ts = klines[0]["timestamp"] / 1000
+        end_ts = klines[-1]["timestamp"] / 1000
+        start_str = datetime.fromtimestamp(start_ts, BJT).strftime("%m-%d %H:%M")
+        end_str = datetime.fromtimestamp(end_ts, BJT).strftime("%m-%d %H:%M")
+        return f"{period_label} {len(klines)}根（{start_str} ~ {end_str}）"
+    except Exception:
+        return f"{period_label} {len(klines)}根"
+
+
+def render_multi_tf_panel(md, regime=None):
+    """
+    - 传入 regime 让面板提示与参谋长解读一致。
+    - 表格下方显示"数据区间"，明确各周期实际使用的 K 线范围。
+    """
     trend_1d = md.get("trend_1d")
     trend_4h = md.get("trend_4h")
     rsi_1h = md.get("rsi_1h")
@@ -188,13 +207,25 @@ def render_multi_tf_panel(md):
     h1_signal_list = []
     if boll_1h.get("mid"): h1_signal_list.append(f"BOLL中轨={boll_1h['mid']:.4f}")
     if kdj_1h.get("j") is not None: h1_signal_list.append(f"KDJ J={kdj_1h['j']:.1f}")
-    if rsi_div: h1_signal_list.append(f"RSI背离={RSI_DIV_MAP.get(rsi_div, rsi_div)}")
+    if rsi_div:
+        # 兜底翻译：未知值 → "无背离"，避免英文暴露
+        h1_signal_list.append(f"RSI背离={RSI_DIV_MAP.get(rsi_div, '无背离')}")
     h1_signal = " | ".join(h1_signal_list) if h1_signal_list else "N/A"
 
     m30_signal_list = []
     if ma10_30m: m30_signal_list.append(f"MA10={ma10_30m:.4f}")
     if adx_30m is not None: m30_signal_list.append(f"ADX={adx_30m:.1f}")
     m30_signal = " | ".join(m30_signal_list) if m30_signal_list else "N/A"
+
+    # 数据区间
+    klines_30m = md.get("klines_30m") or []
+    klines_1h = md.get("klines_1h") or []
+    klines_4h = md.get("klines_4h") or []
+    klines_1d = md.get("klines_1d") or []
+    range_30m = _fmt_data_range(klines_30m, "30m")
+    range_1h = _fmt_data_range(klines_1h, "1H")
+    range_4h = _fmt_data_range(klines_4h, "4H")
+    range_1d = _fmt_data_range(klines_1d, "1D")
 
     html = "<div style='background:#f8f9fa; padding:15px; border-radius:8px; margin-top:15px; border:1px solid #eee;'>"
     html += "<h4 style='margin:0 0 12px 0; color:#2c3e50;'>🌐 多周期共振面板</h4>"
@@ -206,18 +237,33 @@ def render_multi_tf_panel(md):
     html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>⏱️ 30分钟</td><td style='text-align:center;'>{translate_trend(m30_trend)}</td><td style='text-align:center;'>{rsi_30m_str}</td><td style='text-align:center; font-size:12px;'>{m30_signal}</td></tr>"
     html += "</table>"
 
-    tips = []
-    if trend_1d == "up": tips.append("日线多头，回调是机会")
-    elif trend_1d == "down": tips.append("日线空头，反弹是陷阱")
-    else: tips.append("日线震荡，区间操作")
+    # 数据区间行
+    html += (
+        "<div style='margin-top:10px; padding:8px 10px; background:#fff; "
+        "border-left:3px solid #95a5a6; border-radius:0 4px 4px 0; font-size:11.5px; color:#666;'>"
+        f"<b>📊 数据区间：</b>{range_30m} ｜ {range_1h} ｜ {range_4h} ｜ {range_1d}"
+        "</div>"
+    )
 
-    if trend_4h == "up" and trend_1d == "up": tips.append("4H共振多头，优先做多")
-    elif trend_4h == "down" and trend_1d == "down": tips.append("4H共振空头，优先做空")
+    # tips 基于 regime（与参谋长解读一致）
+    try:
+        if regime:
+            tips = build_smart_tips(md, regime)
+        else:
+            tips = []
+            if trend_1d == "up": tips.append("日线多头")
+            elif trend_1d == "down": tips.append("日线空头")
+            else: tips.append("日线震荡")
+        tip_text = "；".join(tips) if tips else "观望"
+    except Exception:
+        tip_text = "观望"
 
-    if rsi_1h is not None and rsi_1h < 35: tips.append("1H超卖，等止跌")
-    elif rsi_1h is not None and rsi_1h > 70: tips.append("1H超买，等回落")
-
-    html += f"<div style='margin-top:12px; padding:10px; background:#fff; border-left:4px solid #3498db; border-radius:0 5px 5px 0;'><p style='margin:0; font-size:13px; color:#2c3e50;'><b>💡 参谋长多周期提示：</b>{'；'.join(tips)}。</p></div>"
+    html += (
+        "<div style='margin-top:12px; padding:10px; background:#fff; "
+        "border-left:4px solid #3498db; border-radius:0 5px 5px 0;'>"
+        f"<p style='margin:0; font-size:13px; color:#2c3e50;'>"
+        f"<b>💡 参谋长多周期提示：</b>{tip_text}。</p></div>"
+    )
     html += "</div>"
     return html
 
@@ -264,7 +310,6 @@ def generate_commander_comment(r, is_triggered):
     md = r.get("market_data", {})
     sr_list = r.get("strategy_results", {})
 
-    # ---- 提取数据锚点 ----
     sym_raw = r.get("symbol", "")
     sym = sym_raw.replace("_USDT", "")
     cp = r.get("current_price")
@@ -282,12 +327,10 @@ def generate_commander_comment(r, is_triggered):
     mid = boll_1h.get("mid")
     is_spot_mode = md.get("data_mode") == "spot"
 
-    # 回撤百分比
     drawdown = 0.0
     if cp and rh and rh > 0:
         drawdown = (rh - cp) / rh * 100
 
-    # ---- 找到"最佳策略结果" ----
     best_sr, max_score = None, -1
     for sname, sr in sr_list.items():
         if sr:
@@ -296,7 +339,6 @@ def generate_commander_comment(r, is_triggered):
                 if s > max_score:
                     max_score, best_sr = s, sr
 
-    # ---- 策略异常：明确显示，不返回空 ----
     if best_sr and best_sr.get("error"):
         return (
             "<div style='background:#ffebee; padding:12px; border-left:5px solid #d32f2f; "
@@ -312,7 +354,6 @@ def generate_commander_comment(r, is_triggered):
             f"该标的未返回任何策略结果，请检查 monitor 日志。</span></div>"
         )
 
-    # ---- 组装话术参数 ----
     fill_kwargs = {
         "sym": sym,
         "rsi": _fmt_num(rsi),
@@ -328,7 +369,6 @@ def generate_commander_comment(r, is_triggered):
         "drawdown": _fmt_num(drawdown, ".1f"),
     }
 
-    # ---- 选择话术池 ----
     pool_key = None
     if is_triggered:
         direction = best_sr.get("direction")
@@ -344,7 +384,6 @@ def generate_commander_comment(r, is_triggered):
         elif direction == "long_trend":
             pool_key = "long_trend"
     else:
-        # 未触发：根据情绪选池
         if rsi is not None and rsi >= 70 and not is_spot_mode:
             pool_key = "no_trigger_greedy"
         elif rsi is not None and rsi <= 35:
@@ -356,7 +395,6 @@ def generate_commander_comment(r, is_triggered):
     template = pick_one(pool)
     comment = fill(template, **fill_kwargs)
 
-    # 若上面填完还是空的，走兜底
     if not comment:
         comment = f"{sym} 盘面暂无明确信号，静观其变。"
 
@@ -565,7 +603,6 @@ def build_symbol_block(r):
     cp_str = f"${cp:.4f}" if isinstance(cp, (int, float)) else "N/A"
     is_spot_mode = md.get("data_mode") == "spot"
 
-    # 策略异常优先渲染
     for sname, sr_obj in r.get("strategy_results", {}).items():
         if sr_obj and sr_obj.get("error"):
             return build_error_card(r, sr_obj["error"])
@@ -656,9 +693,15 @@ def build_symbol_block(r):
         </div>
     """
 
-    html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md)}</div>"
+    # 传入 regime 让面板提示与参谋长解读一致
+    regime_for_panel = None
+    for _sname, _sr in r.get("strategy_results", {}).items():
+        if _sr and _sr.get("regime"):
+            regime_for_panel = _sr.get("regime")
+            break
+    html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md, regime=regime_for_panel)}</div>"
 
-    # ---- 市场状态面板（不再暴露英文） ----
+    # 市场状态面板
     regime = active_sr.get("regime") if active_sr else None
     regime_desc = active_sr.get("regime_desc") if active_sr else None
     momentum_4h = active_sr.get("momentum_4h") if active_sr else None
@@ -679,7 +722,9 @@ def build_symbol_block(r):
             forbidden_str = "、".join([TRACK_NAME_MAP.get(t, t) for t in forbidden])
             html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e74c3c;'>❌ 禁止轨道：{forbidden_str}</p>"
         if active_sr.get("conflict_note"):
-            html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e67e22; font-weight:bold;'>{active_sr['conflict_note']}</p>"
+            # 翻译 track_id，避免英文暴露
+            _cn_note = translate_track_ids(active_sr["conflict_note"])
+            html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e67e22; font-weight:bold;'>{_cn_note}</p>"
         html += "</div>"
 
     if is_triggered:
@@ -795,7 +840,6 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results, hotspot=
 
     tr_syms = [r['symbol'].replace('_USDT', '') for r in triggered_list]
 
-    # ---- 收集数据锚点 ----
     all_directions, all_sub = [], []
     long_syms, short_syms = [], []
     max_rsi, min_rsi = 0, 100
@@ -822,7 +866,6 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results, hotspot=
                 elif d and d.startswith("long"):
                     long_syms.append(sym)
 
-    # ---- 从标题池挑选 ----
     pool = None
     kwargs = {}
 
@@ -842,7 +885,6 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results, hotspot=
             }
         else:
             sym = tr_syms[0]
-            # 从对应标的提取 RSI/费率
             rsi_v = fr_v = fp_v = adx_v = kdj_v = rh_v = "?"
             for r in triggered_list:
                 md = r.get("market_data", {})
@@ -866,7 +908,6 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results, hotspot=
                 "adx": adx_v, "kdj_j": kdj_v, "rh": rh_v, "pct": "?",
             }
     else:
-        # 未触发场景
         if greedy_syms or (max_rsi >= 70):
             pool = SUBJECT_POOL["no_trigger_greedy"]
             kwargs = {
@@ -912,7 +953,6 @@ def build_report(results, active_strategies, watchlist, hotspot=None):
     html += "<h2 style='border-bottom: 3px solid #e74c3c; padding-bottom: 10px; color:#2c3e50;'>📊 参谋长多周期共振报告</h2>"
     html += f"<p style='color:#666;'><b>时间：</b>{now} | <b>策略：</b>{', '.join(active_strategies)} | <b>周期：</b>1D · 4H · 1H · 30m</p>"
 
-    # 热点开场
     try:
         html += build_hotspot_section(hotspot)
     except Exception:
@@ -939,7 +979,6 @@ def build_report(results, active_strategies, watchlist, hotspot=None):
     html += build_unsupported_section(results)
     html += build_glossary_section()
     html += build_risk_warning()
-    # 修复上次的引号语法错误：用中文「」避免与外层 f-string 冲突
     html += "<p style='text-align:center; color:#e67e22; font-weight:bold; font-size:15px; margin-top:20px;'>👉 点赞、转发、关注「牛来参谋长」！</p>"
     html += "</div></body></html>"
     return subject, html
