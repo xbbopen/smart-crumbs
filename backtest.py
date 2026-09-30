@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-回测引擎 v3 - 支持全市场批量扫描
+回测引擎 v4 - 支持全市场批量扫描 + 交易时间戳
 
 两种模式：
-- custom:   回测指定标的（原有逻辑）
+- custom:   回测指定标的
 - universe: 从 Hyperliquid 拉全市场合约，过滤上线满 3 个月的，批量回测
 
-改进点：
-1. 1D K线直接从数据源拉取，不再依赖 4H 聚合（与实盘一致）
-2. 全市场模式自动过滤"上线不足 90 天"的标的
-3. 汇总报告：大数字 + 评级分布 + Top/Bottom 10 + 明细
+改进点（v4）：
+1. 每笔交易记录入场/出场时间（北京时间）
+2. 报告头部显示数据区间
+3. 明细表格增加"入场时间"和"出场时间"列，方便去交易所核对
 """
 import json, time, argparse, os, math, sys
 import bisect
@@ -34,6 +34,21 @@ def parse_date(d):
         return int(dt.timestamp() * 1000)
     except:
         return None
+
+
+def fmt_ts(ts_ms, fmt="%Y-%m-%d %H:%M"):
+    """毫秒时间戳 → 北京时间字符串。"""
+    if ts_ms is None:
+        return "N/A"
+    try:
+        return datetime.fromtimestamp(ts_ms / 1000, BJT).strftime(fmt)
+    except Exception:
+        return "N/A"
+
+
+def fmt_ts_short(ts_ms):
+    """短格式：MM-DD HH:MM"""
+    return fmt_ts(ts_ms, "%m-%d %H:%M")
 
 
 def build_market_data_from_slices(symbol, asset_type, window_30m, window_1h,
@@ -119,7 +134,6 @@ def calc_sharpe(returns, risk_free=0.0):
 
 
 def evaluate_strategy(report):
-    """S/A/B/C/D 评级"""
     excess = report["total_return"] - report["benchmark_return"]
     sharpe = report["sharpe"]
     dd = report["max_dd"]
@@ -205,12 +219,10 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         return None
     klines_4h, info_4h = fetch_and_cache_klines(symbol, asset_type, "4h", 2000)
 
-    # 1h 用 30m 聚合
     klines_1h = aggregate_klines(klines_30m, 2)
     if not klines_4h:
         klines_4h = aggregate_klines(klines_30m, 8)
 
-    # 🚀 1D 优先直接拉取，不足 50 根才降级聚合
     klines_1d_direct, _ = fetch_and_cache_klines(symbol, asset_type, "1d", 400)
     klines_1d = klines_1d_direct if klines_1d_direct else []
     if len(klines_1d) < 50:
@@ -241,7 +253,10 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         print(f"⚠️  {symbol} 回放范围无效")
         return None
 
-    print(f"   数据源：{info_30m['actual']} | 30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根 | 回放区间：第{start_idx}~{end_idx}根")
+    backtest_start_ms = ts_30m[start_idx]
+    backtest_end_ms = ts_30m[end_idx]
+    print(f"   数据源：{info_30m['actual']} | 30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根")
+    print(f"   回放区间：{fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}")
 
     strategy = load_strategy(strategy_name)
     data_mode = "futures" if info_30m["primary"] == "hyperliquid" else "spot"
@@ -287,6 +302,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                     "entry_idx": pos_info["entry_idx"], "exit_idx": i,
                     "direction": direction,
                     "entry_price": entry, "exit_price": exit_price,
+                    "entry_time_ms": ts_30m[pos_info["entry_idx"]],
+                    "exit_time_ms": ts_30m[i],
                     "pnl_pct": pnl_pct, "pnl_usd": pnl,
                     "bars_held": i - pos_info["entry_idx"],
                     "exit_reason": reason,
@@ -328,6 +345,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "entry_idx": pos_info["entry_idx"], "exit_idx": end_idx,
             "direction": direction,
             "entry_price": entry, "exit_price": cp,
+            "entry_time_ms": ts_30m[pos_info["entry_idx"]],
+            "exit_time_ms": ts_30m[end_idx],
             "pnl_pct": pnl_pct, "pnl_usd": pnl,
             "bars_held": end_idx - pos_info["entry_idx"],
             "exit_reason": "末尾平仓",
@@ -351,6 +370,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "long_trades": 0, "short_trades": 0,
             "long_win_rate": 0, "short_win_rate": 0,
             "bars_total": end_idx - start_idx + 1,
+            "backtest_start_ms": backtest_start_ms,
+            "backtest_end_ms": backtest_end_ms,
             "trades": [],
         }
 
@@ -399,6 +420,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         "long_win_rate": round(long_win_rate, 1),
         "short_win_rate": round(short_win_rate, 1),
         "bars_total": end_idx - start_idx + 1,
+        "backtest_start_ms": backtest_start_ms,
+        "backtest_end_ms": backtest_end_ms,
         "trades": trades,
     }
 
@@ -411,7 +434,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 
 
 # ============================================================
-# 🚀 全市场扫描：标的过滤
+# 全市场扫描：标的过滤
 # ============================================================
 def filter_symbols_by_age(symbols, asset_type, min_days=90):
     """过滤掉上线时间不足 min_days 天的标的。"""
@@ -445,12 +468,65 @@ def filter_symbols_by_age(symbols, asset_type, min_days=90):
 
 
 # ============================================================
-# 🚀 全市场汇总报告
+# 交易明细表格（带时间）
 # ============================================================
+def _render_trades_table(trades, max_rows=None):
+    """渲染交易明细表格，含入场/出场北京时间。"""
+    rows = trades if max_rows is None else trades[-max_rows:]
+    if not rows:
+        return ""
+
+    html = "<table style='width:100%;font-size:12px;border-collapse:collapse;margin-top:5px;'>"
+    html += ("<tr style='background:#f0f0f0;'>"
+             "<th style='padding:5px;'>#</th>"
+             "<th style='padding:5px;'>方向</th>"
+             "<th style='padding:5px;'>入场时间</th>"
+             "<th style='padding:5px;'>入场价</th>"
+             "<th style='padding:5px;'>出场时间</th>"
+             "<th style='padding:5px;'>出场价</th>"
+             "<th style='padding:5px;'>盈亏%</th>"
+             "<th style='padding:5px;'>盈亏U</th>"
+             "<th style='padding:5px;'>持仓</th>"
+             "<th style='padding:5px;'>离场原因</th>"
+             "</tr>")
+    # 从最早到最新排序展示（更符合核对习惯）
+    display_rows = sorted(rows, key=lambda t: t.get("entry_time_ms", 0))
+    for i, t in enumerate(display_rows, 1):
+        color = "green" if t["pnl_pct"] > 0 else "red"
+        direction = "多" if t["direction"].startswith("long") else "空"
+        dir_color = "#27ae60" if direction == "多" else "#c0392b"
+        html += "<tr style='border-bottom:1px solid #f0f0f0;'>"
+        html += f"<td style='text-align:center;'>{i}</td>"
+        html += f"<td style='text-align:center;color:{dir_color};font-weight:bold;'>{direction}</td>"
+        html += f"<td style='text-align:center;font-size:11px;'>{fmt_ts_short(t.get('entry_time_ms'))}</td>"
+        html += f"<td style='text-align:center;'>${t['entry_price']:.4f}</td>"
+        html += f"<td style='text-align:center;font-size:11px;'>{fmt_ts_short(t.get('exit_time_ms'))}</td>"
+        html += f"<td style='text-align:center;'>${t['exit_price']:.4f}</td>"
+        html += f"<td style='text-align:center;color:{color};font-weight:bold;'>{t['pnl_pct']*100:.2f}%</td>"
+        html += f"<td style='text-align:center;color:{color};'>{t['pnl_usd']:.2f}</td>"
+        html += f"<td style='text-align:center;'>{t['bars_held']}</td>"
+        html += f"<td style='text-align:center;font-size:11px;'>{t.get('exit_reason','')}</td>"
+        html += "</tr>"
+    html += "</table>"
+    html += ("<p style='color:#888;font-size:11px;margin:5px 0 0 0;'>"
+             "💡 时间均为北京时间（BJT, UTC+8）；"
+             "入场时间为信号触发的那根 30m K线的开盘时间，去交易所核对时可直接对照。</p>")
+    return html
+
+
 def _render_single_detail(r):
-    """单个标的详细卡片（全市场报告的精简版）"""
-    html = f"<div style='background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:15px;'>"
+    """单个标的详细卡片"""
+    html = "<div style='background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:15px;'>"
     html += f"<h3 style='margin-top:0;'>🔍 {r['symbol']} <span style='color:#e67e22;'>{r['rating']}</span></h3>"
+
+    # 数据区间
+    bs = r.get("backtest_start_ms")
+    be = r.get("backtest_end_ms")
+    if bs and be:
+        html += (f"<p style='color:#555;font-size:12px;margin:0 0 5px 0;'>"
+                 f"<b>📅 回测区间：</b>{fmt_ts(bs)} ~ {fmt_ts(be)}"
+                 f"（共 {r['bars_total']} 根 30m K线）</p>")
+
     html += f"<p style='color:#888;font-size:12px;margin:0 0 10px 0;'>{r['rating_desc']} | 数据源：{r['data_source']}</p>"
 
     if r["total_trades"] == 0:
@@ -471,22 +547,9 @@ def _render_single_detail(r):
         html += f"<td style='padding:4px;'><b>平均持仓</b></td><td>{r['avg_bars_held']}根</td></tr>"
         html += "</table>"
 
-        recent = r["trades"][-5:]
-        if recent:
-            html += "<p style='margin:10px 0 5px 0;font-weight:bold;font-size:13px;'>📝 最近 5 笔交易</p>"
-            html += "<table style='width:100%;font-size:12px;border-collapse:collapse;'>"
-            html += "<tr style='background:#f0f0f0;'><th>方向</th><th>入场</th><th>出场</th><th>盈亏%</th><th>持仓</th><th>原因</th></tr>"
-            for t in recent:
-                color = "green" if t["pnl_pct"] > 0 else "red"
-                direction = "多" if t["direction"].startswith("long") else "空"
-                html += f"<tr style='border-bottom:1px solid #f0f0f0;'>"
-                html += f"<td style='text-align:center;'>{direction}</td>"
-                html += f"<td style='text-align:center;'>${t['entry_price']:.4f}</td>"
-                html += f"<td style='text-align:center;'>${t['exit_price']:.4f}</td>"
-                html += f"<td style='text-align:center;color:{color};'>{t['pnl_pct']*100:.2f}%</td>"
-                html += f"<td style='text-align:center;'>{t['bars_held']}</td>"
-                html += f"<td style='text-align:center;font-size:11px;'>{t.get('exit_reason','')}</td></tr>"
-            html += "</table>"
+        # 完整交易明细
+        html += "<p style='margin:12px 0 5px 0;font-weight:bold;font-size:13px;'>📝 交易明细（含入场/出场时间）</p>"
+        html += _render_trades_table(r["trades"])
 
     html += "</div>"
     return html
@@ -527,7 +590,16 @@ def build_universe_backtest_html(reports, strategies, period_desc):
 
     html = "<html><body style='font-family:Arial,sans-serif;max-width:1200px;margin:auto;padding:15px;background:#f4f6f8;'>"
     html += "<h2 style='border-bottom:3px solid #e74c3c;padding-bottom:10px;'>📊 参谋长全市场回测报告</h2>"
-    html += f"<p style='color:#666;'><b>时间：</b>{now} | <b>区间：</b>{period_desc} | <b>策略：</b>{', '.join(strategies)}</p>"
+    html += f"<p style='color:#666;'><b>生成时间：</b>{now} | <b>请求区间：</b>{period_desc} | <b>策略：</b>{', '.join(strategies)}</p>"
+
+    # 实际数据区间（取最宽范围）
+    if reports:
+        all_starts = [r.get("backtest_start_ms") for r in reports if r.get("backtest_start_ms")]
+        all_ends = [r.get("backtest_end_ms") for r in reports if r.get("backtest_end_ms")]
+        if all_starts and all_ends:
+            real_start = min(all_starts)
+            real_end = max(all_ends)
+            html += f"<p style='color:#666;'><b>📅 实际数据区间：</b>{fmt_ts(real_start)} ~ {fmt_ts(real_end)}（北京时间）</p>"
 
     # 大数字汇总
     html += "<div style='display:flex;flex-wrap:wrap;gap:10px;margin:20px 0;'>"
@@ -564,7 +636,7 @@ def build_universe_backtest_html(reports, strategies, period_desc):
                 html += f"<span style='display:inline-block;margin:5px 15px 5px 0;'>{rating}: <b>{n}</b> 个</span>"
         html += "</div>"
 
-    # Top 10 最好
+    # Top 10
     if top_n:
         html += "<h3>🏆 收益 Top 10</h3>"
         html += "<table style='width:100%;border-collapse:collapse;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);font-size:13px;'>"
@@ -601,6 +673,7 @@ def build_universe_backtest_html(reports, strategies, period_desc):
     # 明细
     if detail_list:
         html += f"<h3>🔍 Top {len(detail_list)} 收益标的的详细分析</h3>"
+        html += "<p style='color:#666;font-size:13px;'>下表包含每个标的的完整交易明细（入场/出场时间、价格、盈亏、离场原因），可直接对照交易所 K 线核对。</p>"
         for r in detail_list:
             html += _render_single_detail(r)
 
@@ -610,15 +683,23 @@ def build_universe_backtest_html(reports, strategies, period_desc):
 
 
 # ============================================================
-# 原有单标的详细报告（custom 模式用）
+# 单标的详细报告（custom 模式）
 # ============================================================
 def build_backtest_html(reports, strategies, symbols, period_desc):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
 
     html = f"<html><body style='font-family:Arial,sans-serif;max-width:1100px;margin:auto;padding:15px;background:#f4f6f8;'>"
-    html += f"<h2 style='border-bottom:3px solid #e74c3c;padding-bottom:10px;'>📊 参谋长回测报告 v2</h2>"
-    html += f"<p style='color:#666;'><b>时间：</b>{now} | <b>区间：</b>{period_desc}</p>"
+    html += f"<h2 style='border-bottom:3px solid #e74c3c;padding-bottom:10px;'>📊 参谋长回测报告</h2>"
+    html += f"<p style='color:#666;'><b>生成时间：</b>{now} | <b>请求区间：</b>{period_desc}</p>"
     html += f"<p style='color:#666;'><b>策略：</b>{', '.join(strategies)} | <b>标的：</b>{', '.join(symbols)}</p>"
+
+    if reports:
+        all_starts = [r.get("backtest_start_ms") for r in reports if r.get("backtest_start_ms")]
+        all_ends = [r.get("backtest_end_ms") for r in reports if r.get("backtest_end_ms")]
+        if all_starts and all_ends:
+            real_start = min(all_starts)
+            real_end = max(all_ends)
+            html += f"<p style='color:#666;'><b>📅 实际数据区间：</b>{fmt_ts(real_start)} ~ {fmt_ts(real_end)}（北京时间）</p>"
 
     html += "<h3>📋 总览对比表</h3>"
     html += "<table style='width:100%;border-collapse:collapse;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);font-size:13px;'>"
@@ -682,7 +763,6 @@ def main():
 
     period_desc = f"{start_date or '全量'} 至 {end_date or '今日'}" if (start_date or end_date) else "全量数据"
 
-    # 决定标的列表
     if args.mode == "universe":
         print(f"\n{'='*70}")
         print(f"🌐 全市场扫描模式")
@@ -703,7 +783,7 @@ def main():
         symbols = args.symbols or os.environ.get("BT_SYMBOLS", "").split() or d.get("symbols", ["BTC"])
 
     print(f"\n{'='*70}")
-    print(f"📊 参谋长回测引擎 v3")
+    print(f"📊 参谋长回测引擎 v4")
     print(f"   模式：{args.mode} | 策略：{strategies}")
     print(f"   标的数：{len(symbols)} | 区间：{period_desc}")
     print(f"   本金：{capital}U | 手续费：{fee*100}%")
