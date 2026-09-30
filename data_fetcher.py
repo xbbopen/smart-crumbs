@@ -237,7 +237,7 @@ def fetch_hyperliquid_metrics(symbol, current_price):
 
 # ================= 🚀 从"最近N根"开始试探 =================
 # 扩展探测粒度，覆盖 4H/1D 的 2000+ 目标
-_PROBE_SIZES = [50, 100, 200, 300, 500, 1000, 2000, 3000]
+_PROBE_SIZES = [50, 100, 200, 300, 500, 1000, 2000, 3000，5000]
 
 def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
@@ -280,11 +280,11 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     primary_source = get_primary_source(symbol, asset_type)
 
     last_ts = get_last_timestamp(symbol, interval, source=None)
-
+    existing_count = count_klines(symbol, interval) if last_ts else 0
     actual_source = primary_source
     klines_new = []
-
-    if last_ts:
+    # 🚀 如果 DB 里已有数据量足够，走增量；否则走全量探测
+    if last_ts and existing_count >= desired_bars:
         fetch_start = last_ts + interval_ms
         if fetch_start >= now_ms:
             log.info(f"[{symbol}][{interval}] 数据已最新")
