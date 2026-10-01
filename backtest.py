@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-回测引擎 v7 - 分层回测 + 现实模拟
+回测引擎 - 分层回测 + 现实模拟
 
 v7 核心改动：
 1. 从 config.json 的 backtest_tiers 读分层标的，不再拉全市场
@@ -9,6 +9,17 @@ v7 核心改动：
 4. 报告分三层展示：核心池 / 卫星池 / 观察池
 5. 新增"实盘预估收益"列（扣滑点+费率）
 6. 无冷却期（按用户要求）
+
+v8 核心改动（策略整改适配）：
+7. 适配 v1_default.py 的 global_judgment 结构
+8. 轨道3 改为独立稀有事件（不受状态机约束），触发条件由策略内部负责
+9. 止损统一基于加权入场价 ± ATR 倍数（含 1.5%~3.5% 双保险），由策略内部负责
+10. 波动率熔断（ATR/价格 > 3% 时策略内部自动暂停所有轨道）
+11. KDJ 极端值过滤（J>100 否决做多），由策略内部负责
+12. 轨道4 加"站上30m MA10"硬条件，由策略内部负责
+
+说明：v8 的策略层改动全部在 v1_default.py 内部，回测代码本身不需要
+修改核心逻辑，只保留原有的分层回测 + 现实模拟框架。
 """
 import json, time, argparse, os, math, sys
 import bisect
@@ -24,22 +35,24 @@ from data_fetcher import (
 from email_sender import send_html_email
 
 BJT = timezone(timedelta(hours=8))
-LEVERAGE = 10
+LEVERAGE = 10       # 回测统一按 10 倍杠杆口径计算保证金
 
+# 各周期目标根数（回测用，比实盘多一些历史）
 BT_BARS_30M = 5000
 BT_BARS_4H = 3000
 BT_BARS_1D = 500
 
 # 滑点（按分层）
 SLIPPAGE_BY_TIER = {
-    "core": 0.0002,
-    "satellite": 0.0005,
-    "watch": 0.0010,
+    "core": 0.0002,       # 核心池 0.02%
+    "satellite": 0.0005,  # 卫星池 0.05%
+    "watch": 0.0010,      # 观察池 0.10%
 }
 
 # 资金费率：每 8 小时假设成本 0.01%（仅对做空扣）
 FUNDING_PER_8H = 0.0001
 
+# 分层中文化
 TIER_CN = {"core": "核心池", "satellite": "卫星池", "watch": "观察池"}
 TIER_ORDER = ["core", "satellite", "watch"]
 TIER_ICON = {"core": "🏆", "satellite": "🥇", "watch": "🔬"}
@@ -71,8 +84,12 @@ def fmt_ts_short(ts_ms):
     return fmt_ts(ts_ms, "%m-%d %H:%M")
 
 
+# ============================================================
+# 从预切好的多周期K线组装 market_data
+# ============================================================
 def build_market_data_from_slices(symbol, asset_type, window_30m, window_1h,
                                    window_4h, window_1d, data_mode, data_source):
+    """从预切好的多周期K线组装 market_data。"""
     md = {
         "symbol": symbol, "asset_type": asset_type, "fetch_status": "ok",
         "data_mode": data_mode, "data_source": data_source,
@@ -153,6 +170,7 @@ def calc_sharpe(returns, risk_free=0.0):
 
 
 def evaluate_strategy(report):
+    """S/A/B/C/D 评级"""
     excess = report["total_return"] - report["benchmark_return"]
     sharpe = report["sharpe"]
     dd = report["max_dd"]
@@ -188,34 +206,51 @@ def evaluate_strategy(report):
     return "❌ D级", f"综合得分{score}。跑输基准"
 
 
+# ============================================================
+# 持仓管理：硬止损 + 移动止盈阶梯 + MA10 动态离场
+# ============================================================
 def manage_position(pos, cp, ma10, atr):
+    """
+    持仓管理：返回 (still_hold, exit_price, exit_reason)
+    pos: {"direction": ..., "entry": ..., "stop": ..., "tp_stage": 0/1/2/3, "entry_idx": ...}
+    """
     direction = pos["direction"]
     entry = pos["entry"]
     stop = pos["stop"]
     tp_stage = pos["tp_stage"]
 
     if direction.startswith("long"):
+        # 止损
         if cp <= stop:
             return False, stop, "止损"
+        # 移动止盈阶梯
         profit_atr = (cp - entry) / atr if atr and atr > 0 else 0
         if tp_stage < 1 and profit_atr >= 1.0:
-            pos["stop"] = entry; pos["tp_stage"] = 1
+            pos["stop"] = entry
+            pos["tp_stage"] = 1
         elif tp_stage < 2 and profit_atr >= 2.0:
-            pos["stop"] = entry + 1.0 * atr; pos["tp_stage"] = 2
+            pos["stop"] = entry + 1.0 * atr
+            pos["tp_stage"] = 2
         elif tp_stage < 3 and profit_atr >= 3.0:
-            pos["stop"] = entry + 2.0 * atr; pos["tp_stage"] = 3
+            pos["stop"] = entry + 2.0 * atr
+            pos["tp_stage"] = 3
+        # MA10 离场
         if ma10 and cp < ma10:
             return False, cp, "MA10跌破"
     else:
+        # 做空
         if cp >= stop:
             return False, stop, "止损"
         profit_atr = (entry - cp) / atr if atr and atr > 0 else 0
         if tp_stage < 1 and profit_atr >= 1.0:
-            pos["stop"] = entry; pos["tp_stage"] = 1
+            pos["stop"] = entry
+            pos["tp_stage"] = 1
         elif tp_stage < 2 and profit_atr >= 2.0:
-            pos["stop"] = entry - 1.0 * atr; pos["tp_stage"] = 2
+            pos["stop"] = entry - 1.0 * atr
+            pos["tp_stage"] = 2
         elif tp_stage < 3 and profit_atr >= 3.0:
-            pos["stop"] = entry - 2.0 * atr; pos["tp_stage"] = 3
+            pos["stop"] = entry - 2.0 * atr
+            pos["tp_stage"] = 3
         if ma10 and cp > ma10:
             return False, cp, "MA10突破"
 
@@ -223,23 +258,26 @@ def manage_position(pos, cp, ma10, atr):
 
 
 # ============================================================
-# 核心回测逻辑（含滑点+资金费率）
+# 单标的回测
 # ============================================================
 def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms, tier="satellite"):
-    print(f"\n▶️  回测 [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}")
+    print(f"\n▶️  [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}")
 
     slippage_rate = SLIPPAGE_BY_TIER.get(tier, 0.0005)
 
+    # 30m 直接拉（必须，因为 1h/4h/1d 都要从它聚合或取长历史）
     klines_30m, info_30m = fetch_and_cache_klines(symbol, asset_type, "30m", BT_BARS_30M)
     if not klines_30m:
         print(f"⚠️  {symbol} 30m 数据获取失败")
         return None
     klines_4h, info_4h = fetch_and_cache_klines(symbol, asset_type, "4h", BT_BARS_4H)
 
+    # 1h 从 30m 聚合
     klines_1h = aggregate_klines(klines_30m, 2)
     if not klines_4h:
         klines_4h = aggregate_klines(klines_30m, 8)
 
+    # 1D K线：优先直接从数据源拉取，不足 50 根时降级 4H 聚合
     klines_1d_direct, _ = fetch_and_cache_klines(symbol, asset_type, "1d", BT_BARS_1D)
     klines_1d = klines_1d_direct if klines_1d_direct else []
     if len(klines_1d) < 50:
@@ -256,6 +294,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     ts_1d = [k["timestamp"] for k in klines_1d]
     ts_30m = [k["timestamp"] for k in klines_30m]
 
+    # warmup 200 根用于算指标
     warmup = 200
     start_idx = warmup
     if start_ms:
@@ -272,8 +311,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 
     backtest_start_ms = ts_30m[start_idx]
     backtest_end_ms = ts_30m[end_idx]
-    print(f"   数据源：{info_30m['actual']} | 30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根")
-    print(f"   回放区间：{fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}")
+    print(f"   30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根 | 回放 {fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}")
     print(f"   滑点：{slippage_rate*100:.3f}% / 费率：{FUNDING_PER_8H*100:.3f}%/8h（仅做空）")
 
     strategy = load_strategy(strategy_name)
@@ -290,6 +328,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         current_ts = ts_30m[i]
         window_30m = klines_30m[:i+1]
 
+        # 多周期切片
         j1h = bisect.bisect_right(ts_1h, current_ts)
         j4h = bisect.bisect_right(ts_4h, current_ts)
         j1d = bisect.bisect_right(ts_1d, current_ts)
@@ -305,7 +344,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         atr = md["atr"]
         ma10 = md["ma10"]
 
-        # ---------- 平仓处理 ----------
+        # ---------- 持仓管理 ----------
         if position is not None:
             still_hold, exit_price, reason = manage_position(pos_info, cp, ma10, atr)
             if not still_hold:
@@ -468,6 +507,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     returns_seq = [t["pnl_pct"] for t in trades]
     sharpe = calc_sharpe(returns_seq)
 
+    # 按方向统计
     long_trades = [t for t in trades if t["direction"].startswith("long")]
     short_trades = [t for t in trades if t["direction"] == "short"]
     long_win_rate = len([t for t in long_trades if t["pnl_usd"] > 0]) / len(long_trades) * 100 if long_trades else 0
@@ -537,7 +577,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 
 
 # ============================================================
-# 标的读取（从 config.json 的 backtest_tiers / backtest_watchlist）
+# 从 config.json 读取回测标的（分层）
 # ============================================================
 def resolve_backtest_symbols(cfg, cli_symbols=None):
     """
@@ -572,9 +612,10 @@ def resolve_backtest_symbols(cfg, cli_symbols=None):
 
 
 # ============================================================
-# HTML 渲染
+# HTML 渲染 - 交易卡片
 # ============================================================
-def _render_trade_card(t, idx, show_real=True):
+def _render_trade_card(t, idx):
+    """单笔交易卡片：关键信息加粗，次要信息缩小。"""
     is_win = t["pnl_usd"] > 0
     is_long = t["direction"].startswith("long")
 
@@ -629,24 +670,23 @@ def _render_trade_card(t, idx, show_real=True):
     html += f" &nbsp;·&nbsp; 🚪 {t.get('exit_reason', '')}"
     html += "</div>"
 
-    if show_real:
-        html += "<div style='margin-top:6px; font-size:12px; color:#666; line-height:1.6; background:#fff; padding:6px 10px; border-radius:4px; border-left:3px solid #95a5a6;'>"
-        html += f"💵 <b>理论盈亏</b>（扣手续费）：<span style='color:{accent};font-weight:bold;'>{pnl_usd_str}</span>"
-        html += f" &nbsp;|&nbsp; 滑点 <b style='color:#c0392b;'>-${slip:.2f}</b>"
-        if fund > 0:
-            html += f" &nbsp;|&nbsp; 资金费率 <b style='color:#c0392b;'>-${fund:.2f}</b>"
-        html += f" &nbsp;|&nbsp; <b>实盘预估</b>：<span style='color:{accent};font-weight:bold;'>{pnl_real_str}</span>"
-        html += "</div>"
+    html += "<div style='margin-top:6px; font-size:12px; color:#666; line-height:1.6; background:#fff; padding:6px 10px; border-radius:4px; border-left:3px solid #95a5a6;'>"
+    html += f"💵 <b>理论盈亏</b>（扣手续费）：<span style='color:{accent};font-weight:bold;'>{pnl_usd_str}</span>"
+    html += f" &nbsp;|&nbsp; 滑点 <b style='color:#c0392b;'>-${slip:.2f}</b>"
+    if fund > 0:
+        html += f" &nbsp;|&nbsp; 资金费率 <b style='color:#c0392b;'>-${fund:.2f}</b>"
+    html += f" &nbsp;|&nbsp; <b>实盘预估</b>：<span style='color:{accent};font-weight:bold;'>{pnl_real_str}</span>"
+    html += "</div>"
 
     html += "</div>"
     return html
 
 
-def _render_trades_cards(trades, show_real=True):
+def _render_trades_cards(trades):
     if not trades:
         return ""
     sorted_trades = sorted(trades, key=lambda t: t.get("entry_time_ms", 0))
-    html = "".join(_render_trade_card(t, i, show_real=show_real) for i, t in enumerate(sorted_trades, 1))
+    html = "".join(_render_trade_card(t, i) for i, t in enumerate(sorted_trades, 1))
     html += (
         "<p style='color:#888; font-size:11px; margin:10px 0 0 0; line-height:1.6;'>"
         "💡 <b>时间</b>：北京时间（BJT, UTC+8）<br>"
@@ -678,7 +718,7 @@ def _render_consistency_notice(fee, capital):
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">硬止损</td>
-            <td style="padding:6px 8px;">✅ 按币种分层 ATR 倍数（1.5× / 2.0× / 2.5×）</td>
+            <td style="padding:6px 8px;">✅ 按币种分层 ATR 倍数（1.5× / 2.0× / 2.5×）+ 1.5%~3.5% 双保险</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">移动止盈</td>
@@ -687,6 +727,14 @@ def _render_consistency_notice(fee, capital):
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">MA10 离场</td>
             <td style="padding:6px 8px;">✅ 价格跌破/突破 MA10 立即离场</td>
+        </tr>
+        <tr style="border-bottom:1px solid #90caf9;">
+            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">轨道3（独立）</td>
+            <td style="padding:6px 8px;">✅ 暴跌反弹不受状态机约束，但需 4/4 全满足（回撤≥20% + RSI≤25 + KDJ<-15 + 止跌形态）</td>
+        </tr>
+        <tr style="border-bottom:1px solid #90caf9;">
+            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">波动率熔断</td>
+            <td style="padding:6px 8px;">✅ ATR/价格 > 3% 时所有轨道自动暂停</td>
         </tr>
         <tr>
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">仓位基数</td>
@@ -765,7 +813,7 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
         html += "</div>"
 
         html += "<h4 style='margin:20px 0 12px 0; color:#2c3e50; font-size:15px;'>📝 交易明细（共 {} 笔）</h4>".format(r["total_trades"])
-        html += _render_trades_cards(r["trades"], show_real=True)
+        html += _render_trades_cards(r["trades"])
 
     html += "</div>"
     return html
@@ -923,7 +971,7 @@ def main():
     symbol_list, tier_map = resolve_backtest_symbols(cfg, cli_symbols)
 
     print(f"\n{'='*70}")
-    print(f"📊 参谋长分层回测引擎 v7")
+    print(f"📊 参谋长分层回测引擎")
     print(f"   策略：{strategies}")
     print(f"   标的数：{len(symbol_list)}")
     tier_count = {"core": 0, "satellite": 0, "watch": 0}
