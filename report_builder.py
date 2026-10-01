@@ -299,7 +299,7 @@ def render_track_status_panel(sr):
     if not sr: return ""
     tracks = [
         ("🚀 底部突破做多", sr.get("track_1", {}), "track_1"),
-        ("🔪 见顶做空", sr.get("track_2", {}), "track_2"),
+        ("🔪 见顶做空 + 📉 顺势做空", sr.get("track_2", {}), "track_2"),
         ("🩸 暴跌反弹做多", sr.get("track_3", {}), "track_3"),
         ("🎯 趋势回踩做多", sr.get("track_4", {}), "track_4"),
     ]
