@@ -1,14 +1,20 @@
+# -*- coding: utf-8 -*-
 """
-SQLite 数据库管理模块（带 source 字段）
-- 主键: (symbol, interval, timestamp)
-- source: 标记每条K线的数据来源
+SQLite 数据库管理模块
+- klines: K线数据（主键 symbol+interval+timestamp）
+- meta: 通用键值表（数据源 override 缓存）
 """
 import sqlite3
 import os
+import json
+import time
 import logging
 
 log = logging.getLogger(__name__)
 DB_PATH = "data/market.db"
+
+# 🚀 数据源缓存过期时间：30 天
+SOURCE_OVERRIDE_TTL = 30 * 24 * 3600
 
 
 def get_conn():
@@ -31,12 +37,106 @@ def get_conn():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sym_int ON klines(symbol, interval, timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON klines(source)")
+    # 🚀 通用键值表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     conn.commit()
     return conn
 
 
+# ============================================================
+# meta 表基础读写
+# ============================================================
+def get_meta(key, default=None):
+    conn = get_conn()
+    try:
+        cur = conn.execute("SELECT value FROM meta WHERE key=?", (key,))
+        row = cur.fetchone()
+        return row[0] if row else default
+    except Exception as e:
+        log.error(f"[meta] get_meta({key}) 失败: {e}")
+        return default
+    finally:
+        conn.close()
+
+
+def set_meta(key, value):
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, str(value))
+        )
+        conn.commit()
+    except Exception as e:
+        log.error(f"[meta] set_meta({key}) 失败: {e}")
+    finally:
+        conn.close()
+
+
+def delete_meta(key):
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM meta WHERE key=?", (key,))
+        conn.commit()
+    except Exception as e:
+        log.error(f"[meta] delete_meta({key}) 失败: {e}")
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 数据源 override 缓存
+# ============================================================
+def _source_override_key(symbol, interval):
+    return f"source_override:{symbol}:{interval}"
+
+
+def get_source_override(symbol, interval):
+    """
+    读取该标的该周期上次成功的源。
+    返回 "hyperliquid" / "binance_spot" / "gate_spot"，或 None。
+    """
+    key = _source_override_key(symbol, interval)
+    raw = get_meta(key)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        expire_ts = data.get("expire_ts", 0)
+        if time.time() > expire_ts:
+            delete_meta(key)
+            return None
+        return data.get("source")
+    except Exception as e:
+        log.error(f"[override] 解析失败({symbol}, {interval}): {e}")
+        delete_meta(key)
+        return None
+
+
+def set_source_override(symbol, interval, source):
+    """记录有效源。TTL 30 天。"""
+    key = _source_override_key(symbol, interval)
+    data = {
+        "source": source,
+        "expire_ts": time.time() + SOURCE_OVERRIDE_TTL,
+    }
+    set_meta(key, json.dumps(data))
+
+
+def clear_source_override(symbol, interval):
+    """清除 override（该源失效时调用）。"""
+    delete_meta(_source_override_key(symbol, interval))
+
+
+# ============================================================
+# K线读写（保持原样）
+# ============================================================
 def get_last_timestamp(symbol, interval, source=None):
-    """查询最后时间戳。指定 source 时只查该源。"""
     conn = get_conn()
     try:
         if source:
@@ -53,7 +153,6 @@ def get_last_timestamp(symbol, interval, source=None):
 
 
 def upsert_klines(symbol, interval, klines, source="unknown"):
-    """批量写入（同时间戳覆盖，source也更新）"""
     if not klines:
         return 0
     conn = get_conn()
@@ -72,7 +171,6 @@ def upsert_klines(symbol, interval, klines, source="unknown"):
 
 
 def load_klines(symbol, interval, limit=500, source=None):
-    """读取最新 limit 根。source=None 时读混合数据。"""
     conn = get_conn()
     try:
         if source:
@@ -111,7 +209,6 @@ def count_klines(symbol, interval, source=None):
 
 
 def source_stats(symbol, interval):
-    """统计各源数据量"""
     conn = get_conn()
     try:
         cur = conn.execute(
@@ -136,11 +233,8 @@ def list_symbols():
     finally:
         conn.close()
 
+
 def vacuum_db():
-    """
-    压缩数据库，返回 (before_mb, after_mb)。
-    消除多处内联 VACUUM 带来的代码重复。
-    """
     before = db_size_mb()
     conn = get_conn()
     try:
