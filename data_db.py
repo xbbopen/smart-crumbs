@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 SQLite 数据库管理模块
-- klines: K线数据（主键 symbol+interval+timestamp）
-- meta: 通用键值表（数据源 override 缓存）
+- klines: K线数据
+- meta: 通用键值表（数据源 override + max_available 缓存）
 """
 import sqlite3
 import os
@@ -13,8 +13,8 @@ import logging
 log = logging.getLogger(__name__)
 DB_PATH = "data/market.db"
 
-# 🚀 数据源缓存过期时间：30 天
 SOURCE_OVERRIDE_TTL = 30 * 24 * 3600
+MAX_AVAILABLE_TTL = 30 * 24 * 3600
 
 
 def get_conn():
@@ -37,7 +37,6 @@ def get_conn():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sym_int ON klines(symbol, interval, timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON klines(source)")
-    # 🚀 通用键值表
     conn.execute("""
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
@@ -90,36 +89,29 @@ def delete_meta(key):
 
 
 # ============================================================
-# 数据源 override 缓存
+# 数据源 override
 # ============================================================
 def _source_override_key(symbol, interval):
     return f"source_override:{symbol}:{interval}"
 
 
 def get_source_override(symbol, interval):
-    """
-    读取该标的该周期上次成功的源。
-    返回 "hyperliquid" / "binance_spot" / "gate_spot"，或 None。
-    """
     key = _source_override_key(symbol, interval)
     raw = get_meta(key)
     if not raw:
         return None
     try:
         data = json.loads(raw)
-        expire_ts = data.get("expire_ts", 0)
-        if time.time() > expire_ts:
+        if time.time() > data.get("expire_ts", 0):
             delete_meta(key)
             return None
         return data.get("source")
-    except Exception as e:
-        log.error(f"[override] 解析失败({symbol}, {interval}): {e}")
+    except Exception:
         delete_meta(key)
         return None
 
 
 def set_source_override(symbol, interval, source):
-    """记录有效源。TTL 30 天。"""
     key = _source_override_key(symbol, interval)
     data = {
         "source": source,
@@ -129,12 +121,49 @@ def set_source_override(symbol, interval, source):
 
 
 def clear_source_override(symbol, interval):
-    """清除 override（该源失效时调用）。"""
     delete_meta(_source_override_key(symbol, interval))
 
 
 # ============================================================
-# K线读写（保持原样）
+# 🚀 新增：max_available（该标的能拿到的最大根数）
+# ============================================================
+def _max_available_key(symbol, interval):
+    return f"max_available:{symbol}:{interval}"
+
+
+def get_max_available(symbol, interval):
+    """读取该标的该周期能拿到的最大根数。返回 int 或 None。"""
+    key = _max_available_key(symbol, interval)
+    raw = get_meta(key)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        if time.time() > data.get("expire_ts", 0):
+            delete_meta(key)
+            return None
+        return data.get("max_bars")
+    except Exception:
+        delete_meta(key)
+        return None
+
+
+def set_max_available(symbol, interval, max_bars):
+    """记录最大可获取根数。TTL 30 天。"""
+    key = _max_available_key(symbol, interval)
+    data = {
+        "max_bars": int(max_bars),
+        "expire_ts": time.time() + MAX_AVAILABLE_TTL,
+    }
+    set_meta(key, json.dumps(data))
+
+
+def clear_max_available(symbol, interval):
+    delete_meta(_max_available_key(symbol, interval))
+
+
+# ============================================================
+# K线读写
 # ============================================================
 def get_last_timestamp(symbol, interval, source=None):
     conn = get_conn()
