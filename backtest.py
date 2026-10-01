@@ -68,6 +68,39 @@ TIER_COLOR = {"core": "#27ae60", "satellite": "#3498db", "watch": "#9b59b6"}
 # ============================================================
 # 工具函数
 # ============================================================
+# ============================================================
+# 🚀 智能价格格式化（按量级自动调整小数位）
+# ============================================================
+def fmt_price(p):
+    """
+    按价格量级智能格式化，保留 4-6 位有效数字，不带千位分隔符。
+    - BTC 83935   → "83935.00"
+    - ETH 2700.5  → "2700.5000"
+    - DOGE 0.1534 → "0.15340"
+    - PEPE 0.0000089 → "0.00000890"
+    """
+    if p is None:
+        return "N/A"
+    try:
+        p = float(p)
+        if p == 0:
+            return "0"
+        ap = abs(p)
+        if ap >= 1000:
+            return f"{p:.2f}"
+        elif ap >= 1:
+            return f"{p:.4f}"
+        elif ap >= 0.01:
+            return f"{p:.5f}"
+        elif ap >= 0.0001:
+            return f"{p:.6f}"
+        elif ap >= 0.000001:
+            return f"{p:.8f}"
+        else:
+            return f"{p:.10f}"
+    except (TypeError, ValueError):
+        return str(p)
+
 def parse_date(d):
     if not d: return None
     try:
@@ -700,11 +733,11 @@ def _render_trade_card(t, idx):
     html += "</div>"
 
     html += "<div style='margin-top:8px; font-size:13px; color:#333;'>"
-    html += f"<span style='color:#888;'>入场</span> <b>${t['entry_price']:.4f}</b>"
+    html += f"<span style='color:#888;'>入场</span> <b>${fmt_price(t['entry_price'])}</b>"
     html += f" <span style='color:#888;'>→</span> "
-    html += f"<span style='color:#888;'>出场</span> <b>${t['exit_price']:.4f}</b>"
+    html += f"<span style='color:#888;'>出场</span> <b>${fmt_price(t['exit_price'])}</b>"
     html += f" <span style='color:#888;'>|</span> "
-    html += f"<span style='color:#888;'>硬止损</span> <b style='color:#c0392b;'>${stop_price:.4f}</b>"
+    html += f"<span style='color:#888;'>硬止损</span> <b style='color:#c0392b;'>${fmt_price(stop_price)}</b>"
     html += "</div>"
 
     html += "<div style='margin-top:6px; font-size:12px; color:#888; line-height:1.6;'>"
