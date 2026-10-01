@@ -497,6 +497,12 @@ def build_symbol_block(r):
     cp_str = f"${cp:.4f}" if isinstance(cp, (int, float)) else "N/A"
     is_spot = md.get("data_mode") == "spot"
 
+    # 🚀 修复：提前定义常用指标变量，供后续"未触发"分支使用
+    rsi = md.get("rsi")
+    rsi_1h = md.get("rsi_1h")
+    adx = md.get("adx")
+    ma10 = md.get("ma10")
+
     for sname, sr_obj in r.get("strategy_results", {}).items():
         if sr_obj and sr_obj.get("error"):
             return build_error_card(r, sr_obj["error"])
