@@ -1,4 +1,4 @@
-name: 多标的的合约监控
+name: 牛来参谋长多标的监控
 
 on:
   workflow_dispatch:
