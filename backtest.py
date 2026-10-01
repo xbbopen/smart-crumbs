@@ -33,6 +33,12 @@ from data_fetcher import (
     get_primary_source, to_hyperliquid_coin, get_hyperliquid_universe,
 )
 from email_sender import send_html_email
+# 🚀 强制行缓冲，让 print 立即输出到 GitHub Actions 日志
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 BJT = timezone(timedelta(hours=8))
 LEVERAGE = 10       # 回测统一按 10 倍杠杆口径计算保证金
