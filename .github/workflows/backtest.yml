@@ -40,6 +40,10 @@ on:
         required: false
         default: 'futures'
 
+concurrency:
+  group: market-db-lock
+  cancel-in-progress: false
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
@@ -51,6 +55,7 @@ jobs:
         with:
           python-version: '3.11'
 
+      # 从 Cache 恢复数据库
       - name: 恢复数据库
         uses: actions/cache@v4
         with:
@@ -80,6 +85,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
 
+      # 把更新后的 DB 存回 Cache
       - name: 保存数据库到 Cache
         uses: actions/cache@v4
         with:
