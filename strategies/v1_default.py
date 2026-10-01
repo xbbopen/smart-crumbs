@@ -550,8 +550,6 @@ class V1DefaultStrategy(BaseStrategy):
         warnings = []
         if kdj_1h.get("j") is not None and kdj_1h["j"] > 100:
             warnings.append(f"1H KDJ 极度超买 J={kdj_j_str}")
-        if rh and price and (rh - price) / rh < 0.03:
-            warnings.append(f"距前高仅 {(rh-price)/rh*100:.1f}%")
         if atr_pct > 2.0:
             warnings.append(f"波动率偏高 ATR={atr_pct:.1f}%")
 
