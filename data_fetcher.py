@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-统一数据获取模块（DB优先 + 增量 + 源切换保护 + 从最近N根探测）
+统一数据获取模块（DB优先 + 增量 + 源切换保护 + 分页补全）
 """
-import time, requests
+import time, requests, math
 import logging
 
 from data_db import get_last_timestamp, upsert_klines, load_klines, count_klines
@@ -148,12 +148,16 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=200, start_ms=None, 
     return None, result[1]
 
 def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end_ms):
+    """
+    🚀 分页式拉取（Binance 单次上限 1000 根）
+    """
     all_klines = []
     if start_ms and end_ms:
         cur = start_ms
-        for _ in range(3):
+        max_loops = math.ceil(limit / 1000) + 2
+        for _ in range(max_loops):
             if cur >= end_ms: break
-            chunk_end = min(cur + 5000 * INTERVAL_MS_MAP.get(interval, 30*60*1000), end_ms)
+            chunk_end = min(cur + 1000 * INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000), end_ms)
             params = {"symbol": binance_sym, "interval": interval,
                       "startTime": cur, "endTime": chunk_end, "limit": 1000}
             ok, data = _request_with_retry(url, source="binance", params=params)
@@ -161,8 +165,9 @@ def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end
             if not data: break
             all_klines.extend(data)
             cur = int(data[-1][0]) + 1
+            if len(data) < 1000: break  # 边界到达
     else:
-        params = {"symbol": binance_sym, "interval": interval, "limit": limit}
+        params = {"symbol": binance_sym, "interval": interval, "limit": min(limit, 1000)}
         ok, data = _request_with_retry(url, source="binance", params=params)
         if not ok: return None, data
         all_klines = data if data else []
@@ -178,21 +183,52 @@ def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end
     return klines, "ok"
 
 def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, end_ms=None):
+    """
+    🚀 分页式拉取（Gate.io 单次上限 1000 根）
+    """
     gate_sym = to_gate_spot(symbol)
-    params = {"currency_pair": gate_sym, "interval": interval, "limit": min(limit, 1000)}
-    if start_ms: params["from"] = start_ms // 1000
-    if end_ms: params["to"] = end_ms // 1000
-    ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
-    if not ok or not data:
-        alt_sym = to_gate_spot_fallback(symbol)
-        if alt_sym != gate_sym:
-            params["currency_pair"] = alt_sym
+    all_klines = []
+    
+    if start_ms and end_ms:
+        cur = start_ms
+        max_loops = math.ceil(limit / 1000) + 2
+        for _ in range(max_loops):
+            if cur >= end_ms: break
+            chunk_end = min(cur + 1000 * INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000), end_ms)
+            params = {"currency_pair": gate_sym, "interval": interval, "limit": 1000, "from": cur // 1000, "to": chunk_end // 1000}
             ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
-        if not ok or not data: return None, "not_found"
-    klines = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]),
-               "close": float(item[2]), "high": float(item[3]),
-               "low": float(item[4]), "open": float(item[5])} for item in data]
-    return klines, "ok"
+            if not ok or not data:
+                alt_sym = to_gate_spot_fallback(symbol)
+                if alt_sym != gate_sym:
+                    params["currency_pair"] = alt_sym
+                    ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
+                if not ok or not data: break
+            parsed = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]),
+                       "close": float(item[2]), "high": float(item[3]),
+                       "low": float(item[4]), "open": float(item[5])} for item in data]
+            all_klines.extend(parsed)
+            cur = max(k["timestamp"] for k in parsed) + 1
+            if len(data) < 1000: break  # 边界到达
+    else:
+        params = {"currency_pair": gate_sym, "interval": interval, "limit": min(limit, 1000)}
+        ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
+        if not ok or not data:
+            alt_sym = to_gate_spot_fallback(symbol)
+            if alt_sym != gate_sym:
+                params["currency_pair"] = alt_sym
+                ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
+            if not ok or not data: return None, "not_found"
+        all_klines = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]),
+                       "close": float(item[2]), "high": float(item[3]),
+                       "low": float(item[4]), "open": float(item[5])} for item in data]
+    
+    # 去重 + 排序
+    seen, result = set(), []
+    for k in sorted(all_klines, key=lambda x: x["timestamp"]):
+        if k["timestamp"] not in seen:
+            seen.add(k["timestamp"])
+            result.append(k)
+    return result, "ok"
 
 def fetch_hyperliquid_klines(symbol, interval="30m", limit=200, start_ms=None, end_ms=None):
     coin = to_hyperliquid_coin(symbol)
@@ -235,32 +271,35 @@ def fetch_hyperliquid_metrics(symbol, current_price):
     return None
 
 
-# ================= 🚀 从"最近N根"开始试探 =================
-# 扩展探测粒度，覆盖 4H/1D 的 2000+ 目标
-_PROBE_SIZES = [50, 100, 200, 300, 500, 1000, 2000, 3000, 5000]
-
+# ================= 🚀 智能拉取：根据数据源选择策略 =================
 def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
+    """
+    Hyperliquid 走"一击式"（1次请求），Binance/Gate 走"分页式"（内部循环分页）。
+    """
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
-    all_klines = []
-
-    for probe_size in _PROBE_SIZES:
-        if len(all_klines) >= target_bars:
-            break
-        start_ms = now_ms - (probe_size * interval_ms)
-        klines, status = fetch_func(symbol, interval, probe_size, start_ms, now_ms)
+    start_ms = now_ms - (target_bars * interval_ms)
+    
+    func_name = getattr(fetch_func, "__name__", "")
+    
+    if "hyperliquid" in func_name:
+        # Hyperliquid 一击式：一次要多少给多少
+        klines, status = fetch_func(symbol, interval, target_bars, start_ms, now_ms)
         if klines:
-            all_klines = klines
-            log.info(f"    [{symbol}][{interval}] 试探{probe_size}根 → 拿到{len(klines)}根")
-            if len(klines) < probe_size:
-                log.info(f"    [{symbol}][{interval}] 数据边界到达，最终{len(klines)}根")
-                break
+            log.info(f"    [{symbol}][{interval}] Hyperliquid一击式请求{target_bars}根 → 拿到{len(klines)}根")
+            return klines[:target_bars]
         else:
-            log.info(f"    [{symbol}][{interval}] 试探{probe_size}根 → {status}")
-            if probe_size == _PROBE_SIZES[0]:
-                log.warning(f"    [{symbol}][{interval}] 连最近50根都拿不到，该源无此周期数据")
-                break
-    return all_klines[:target_bars]
+            log.warning(f"    [{symbol}][{interval}] Hyperliquid一击式请求失败: {status}")
+            return []
+    else:
+        # Binance / Gate 分页式：fetch_func 内部会自动循环分页
+        klines, status = fetch_func(symbol, interval, target_bars, start_ms, now_ms)
+        if klines:
+            log.info(f"    [{symbol}][{interval}] 分页式请求{target_bars}根 → 拿到{len(klines)}根")
+            return klines[:target_bars]
+        else:
+            log.warning(f"    [{symbol}][{interval}] 分页式请求失败: {status}")
+            return []
 
 
 # ================= 主源判定 =================
@@ -276,15 +315,17 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     """DB优先。瀑布式降级：主源 → 币安 → Gate"""
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
-
     primary_source = get_primary_source(symbol, asset_type)
-
+    
     last_ts = get_last_timestamp(symbol, interval, source=None)
     existing_count = count_klines(symbol, interval) if last_ts else 0
+
     actual_source = primary_source
     klines_new = []
-    # 🚀 如果 DB 里已有数据量足够，走增量；否则走全量探测
+
+    # 🚀 核心修复：判断是走增量还是全量补全
     if last_ts and existing_count >= desired_bars:
+        # 增量拉取
         fetch_start = last_ts + interval_ms
         if fetch_start >= now_ms:
             log.info(f"[{symbol}][{interval}] 数据已最新")
@@ -299,7 +340,8 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
                 klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
                 if klines_new: actual_source = "gate_spot"
     else:
-        log.warning(f"[{symbol}][{interval}] DB无数据，从最近N根探测")
+        # 首次拉取 或 数据量不足，触发全量补全
+        log.warning(f"[{symbol}][{interval}] DB数据不足({existing_count}/{desired_bars})，重新全量拉取")
         if primary_source == "hyperliquid":
             klines_new = fetch_klines_from_now(fetch_hyperliquid_klines, symbol, interval, desired_bars)
             if klines_new: actual_source = "hyperliquid"
@@ -504,7 +546,7 @@ def build_market_data(symbol, asset_type):
     if not klines_4h:
         klines_4h = aggregate_klines(klines_30m, 8)
 
-    # 🚀 1D K线：优先直接从数据源拉取，避免因 4H 数据不足导致日线指标全空
+    # 1D K线：优先直接从数据源拉取，不足 50 根时降级 4H 聚合
     klines_1d = []
     try:
         klines_1d_direct, _ = fetch_and_cache_klines(symbol, asset_type, "1d", 400)
@@ -514,7 +556,6 @@ def build_market_data(symbol, asset_type):
     except Exception as e:
         log.warning(f"[{symbol}][1d] 直接拉取失败（将降级从4H聚合）：{type(e).__name__}: {e}")
 
-    # 兜底：1D 数据不足 50 根时，从 4H 聚合
     if len(klines_1d) < 50:
         klines_1d_agg = aggregate_klines(klines_4h, 6)
         if len(klines_1d_agg) > len(klines_1d):
