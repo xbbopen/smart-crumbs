@@ -177,10 +177,15 @@ def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end
         if not ok: return None, data
         all_klines = data if data else []
     if not all_klines: return None, "not_found"
+    interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
+    now_ms = int(time.time() * 1000)
     seen, klines = set(), []
     for item in all_klines:
         ts = int(item[0])
         if ts in seen: continue
+        # 🚀 过滤掉"未收盘"的K线
+        if ts + interval_ms > now_ms:
+            continue
         seen.add(ts)
         klines.append({"timestamp": ts, "open": float(item[1]), "high": float(item[2]),
                        "low": float(item[3]), "close": float(item[4]), "volume": float(item[5])})
@@ -227,8 +232,13 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
                        "close": float(item[2]), "high": float(item[3]),
                        "low": float(item[4]), "open": float(item[5])} for item in data]
 
+    interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
+    now_ms = int(time.time() * 1000)
     seen, result = set(), []
     for k in sorted(all_klines, key=lambda x: x["timestamp"]):
+        # 🚀 过滤掉"未收盘"的K线
+        if k["timestamp"] + interval_ms > now_ms:
+            continue
         if k["timestamp"] not in seen:
             seen.add(k["timestamp"])
             result.append(k)
@@ -250,9 +260,17 @@ def fetch_hyperliquid_klines(symbol, interval="30m", limit=200, start_ms=None, e
                                     source="hyperliquid", json=payload)
     if not ok: return None, data
     if not data or not isinstance(data, list): return None, "not_found"
-    klines = [{"timestamp": item["t"], "open": float(item["o"]),
-               "high": float(item["h"]), "low": float(item["l"]),
-               "close": float(item["c"]), "volume": float(item["v"])} for item in data]
+    interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
+    now_ms = int(time.time() * 1000)
+    klines = []
+    for item in data:
+        ts = item["t"]
+        # 🚀 过滤掉"未收盘"的K线：收盘时间 = 开盘时间 + 周期长度
+        if ts + interval_ms > now_ms:
+            continue
+        klines.append({"timestamp": ts, "open": float(item["o"]),
+                       "high": float(item["h"]), "low": float(item["l"]),
+                       "close": float(item["c"]), "volume": float(item["v"])})
     return klines, "ok"
 
 def fetch_hyperliquid_metrics(symbol, current_price):
