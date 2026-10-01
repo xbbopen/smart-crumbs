@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-统一数据获取模块（DB优先 + 增量 + 源切换保护 + 智能探测）
+统一数据获取模块（DB优先 + 增量 + 源切换保护 + 智能探测 + 数据源缓存）
 """
 import time, requests, math
 import logging
 
-from data_db import get_last_timestamp, upsert_klines, load_klines, count_klines
+from data_db import (
+    get_last_timestamp, upsert_klines, load_klines, count_klines,
+    get_source_override, set_source_override, clear_source_override,
+)
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +22,6 @@ INTERVAL_MS_MAP = {
     "1d": 24 * 60 * 60 * 1000,
 }
 
-# 🚀 探测式步长：从近到远，逐步扩大，碰到边界自动停下
 _PROBE_SIZES = [500, 1000, 2000, 3000, 5000, 8000]
 
 _HL_ALIAS = {
@@ -151,10 +153,6 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=200, start_ms=None, 
     return None, result[1]
 
 def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end_ms):
-    """
-    🚀 分页式拉取（Binance 单次上限 1000 根）
-    修复：遇到空窗口不中断，跳过继续往后翻。
-    """
     all_klines = []
     if start_ms and end_ms:
         cur = start_ms
@@ -167,12 +165,11 @@ def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end
             ok, data = _request_with_retry(url, source="binance", params=params)
             if not ok: return None, data
             if not data:
-                # 空窗口，跳过继续往后翻
                 cur = chunk_end + INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
                 continue
             all_klines.extend(data)
             cur = int(data[-1][0]) + 1
-            if len(data) < 1000: break  # 边界到达
+            if len(data) < 1000: break
     else:
         params = {"symbol": binance_sym, "interval": interval, "limit": min(limit, 1000)}
         ok, data = _request_with_retry(url, source="binance", params=params)
@@ -190,20 +187,17 @@ def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end
     return klines, "ok"
 
 def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, end_ms=None):
-    """
-    🚀 分页式拉取（Gate.io 单次上限 1000 根）
-    修复：遇到空窗口不中断，跳过继续往后翻。
-    """
     gate_sym = to_gate_spot(symbol)
     all_klines = []
-    
+
     if start_ms and end_ms:
         cur = start_ms
         max_loops = math.ceil(limit / 1000) + 2
         for _ in range(max_loops):
             if cur >= end_ms: break
             chunk_end = min(cur + 1000 * INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000), end_ms)
-            params = {"currency_pair": gate_sym, "interval": interval, "limit": 1000, "from": cur // 1000, "to": chunk_end // 1000}
+            params = {"currency_pair": gate_sym, "interval": interval, "limit": 1000,
+                      "from": cur // 1000, "to": chunk_end // 1000}
             ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
             if not ok or not data:
                 alt_sym = to_gate_spot_fallback(symbol)
@@ -211,7 +205,6 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
                     params["currency_pair"] = alt_sym
                     ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
             if not ok or not data:
-                # 空窗口，跳过继续往后翻
                 cur = chunk_end + INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
                 continue
             parsed = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]),
@@ -219,7 +212,7 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
                        "low": float(item[4]), "open": float(item[5])} for item in data]
             all_klines.extend(parsed)
             cur = max(k["timestamp"] for k in parsed) + 1
-            if len(data) < 1000: break  # 边界到达
+            if len(data) < 1000: break
     else:
         params = {"currency_pair": gate_sym, "interval": interval, "limit": min(limit, 1000)}
         ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
@@ -232,7 +225,7 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
         all_klines = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]),
                        "close": float(item[2]), "high": float(item[3]),
                        "low": float(item[4]), "open": float(item[5])} for item in data]
-    
+
     seen, result = set(), []
     for k in sorted(all_klines, key=lambda x: x["timestamp"]):
         if k["timestamp"] not in seen:
@@ -281,18 +274,13 @@ def fetch_hyperliquid_metrics(symbol, current_price):
     return None
 
 
-# ================= 🚀 智能探测拉取 =================
+# ================= 智能探测拉取 =================
 def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
-    """
-    Hyperliquid 走"一击式"（1次请求），Binance/Gate 走"探测式"（由近及远逐步扩大）。
-    探测式完美解决新币上线晚、第一页空的问题。
-    """
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
     func_name = getattr(fetch_func, "__name__", "")
-    
+
     if "hyperliquid" in func_name:
-        # Hyperliquid 一击式
         start_ms = now_ms - (target_bars * interval_ms)
         klines, status = fetch_func(symbol, interval, target_bars, start_ms, now_ms)
         if klines:
@@ -301,7 +289,6 @@ def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
         log.warning(f"    [{symbol}][{interval}] Hyperliquid一击式请求失败: {status}")
         return []
     else:
-        # Binance / Gate 探测式
         all_klines = []
         for probe_size in _PROBE_SIZES:
             if len(all_klines) >= target_bars:
@@ -316,7 +303,6 @@ def fetch_klines_from_now(fetch_func, symbol, interval, target_bars):
                     break
             else:
                 log.info(f"    [{symbol}][{interval}] 探测{probe_size}根 → {status}")
-                # 如果连最近 500 根都拿不到，说明该源无此周期数据
                 if probe_size == _PROBE_SIZES[0]:
                     log.warning(f"    [{symbol}][{interval}] 连最近500根都拿不到，该源无此周期数据")
                     break
@@ -332,61 +318,113 @@ def get_primary_source(symbol, asset_type):
     return "binance_spot"
 
 
+# ============================================================
+# 按源名调用对应的 fetch 函数
+# ============================================================
+def _fetch_from_source_full(source_name, symbol, interval, target_bars):
+    if source_name == "hyperliquid":
+        return fetch_klines_from_now(fetch_hyperliquid_klines, symbol, interval, target_bars)
+    elif source_name == "binance_spot":
+        return fetch_klines_from_now(fetch_binance_spot_klines, symbol, interval, target_bars)
+    elif source_name == "gate_spot":
+        return fetch_klines_from_now(fetch_gateio_spot_klines, symbol, interval, target_bars)
+    return []
+
+
+def _fetch_from_source_range(source_name, symbol, interval, limit, start_ms, end_ms):
+    if source_name == "hyperliquid":
+        klines, _ = fetch_hyperliquid_klines(symbol, interval, limit, start_ms, end_ms)
+        return klines
+    elif source_name == "binance_spot":
+        klines, _ = fetch_binance_spot_klines(symbol, interval, limit, start_ms, end_ms)
+        return klines
+    elif source_name == "gate_spot":
+        klines, _ = fetch_gateio_spot_klines(symbol, interval, limit, start_ms, end_ms)
+        return klines
+    return []
+
+
+# ============================================================
+# 🚀 核心：fetch_and_cache_klines（带数据源 override + Hyperliquid 上线感知）
+# ============================================================
 def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
-    """DB优先。瀑布式降级：主源 → 币安 → Gate"""
+    """
+    DB优先 + 数据源 override 缓存 + Hyperliquid 上线感知。
+    """
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
     primary_source = get_primary_source(symbol, asset_type)
-    
+
     last_ts = get_last_timestamp(symbol, interval, source=None)
     existing_count = count_klines(symbol, interval) if last_ts else 0
 
-    actual_source = primary_source
+    # 读取 override
+    override = get_source_override(symbol, interval)
+
+    # 🚀 关键改进：Hyperliquid 现已上线该合约 → 作废旧 override
+    if asset_type == "futures" and override and override != "hyperliquid":
+        log.info(f"    [{symbol}][{interval}] ⚡ Hyperliquid 现已上线该合约，作废旧 override ({override})")
+        clear_source_override(symbol, interval)
+        override = None
+
+    # 构建尝试顺序
+    sources_to_try = []
+    if override:
+        sources_to_try.append(override)
+        log.info(f"    [{symbol}][{interval}] 使用缓存源: {override}")
+
+    default_order = []
+    if primary_source == "hyperliquid":
+        default_order.append("hyperliquid")
+    default_order.extend(["binance_spot", "gate_spot"])
+
+    for s in default_order:
+        if s not in sources_to_try:
+            sources_to_try.append(s)
+
+    actual_source = None
     klines_new = []
 
-    # 🚀 核心修复：判断是走增量还是全量补全
-    if last_ts and existing_count >= desired_bars:
-        # 增量拉取
+    is_full_fetch = (not last_ts) or (existing_count < desired_bars)
+
+    if is_full_fetch:
+        log.warning(f"[{symbol}][{interval}] DB数据不足({existing_count}/{desired_bars})，重新全量拉取")
+        for src in sources_to_try:
+            klines_new = _fetch_from_source_full(src, symbol, interval, desired_bars)
+            if klines_new:
+                actual_source = src
+                set_source_override(symbol, interval, src)
+                log.info(f"    [{symbol}][{interval}] ✅ 使用 {src} 成功，写入 override")
+                break
+        if not actual_source:
+            clear_source_override(symbol, interval)
+            log.warning(f"    [{symbol}][{interval}] 所有源都失败，清除 override")
+    else:
         fetch_start = last_ts + interval_ms
         if fetch_start >= now_ms:
             log.info(f"[{symbol}][{interval}] 数据已最新")
         else:
-            if primary_source == "hyperliquid":
-                klines_new, _ = fetch_hyperliquid_klines(symbol, interval, 5000, fetch_start, now_ms)
-                if klines_new: actual_source = "hyperliquid"
-            if not klines_new:
-                klines_new, _ = fetch_binance_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-                if klines_new: actual_source = "binance_spot"
-            if not klines_new:
-                klines_new, _ = fetch_gateio_spot_klines(symbol, interval, 5000, fetch_start, now_ms)
-                if klines_new: actual_source = "gate_spot"
-    else:
-        # 首次拉取 或 数据量不足，触发全量补全
-        log.warning(f"[{symbol}][{interval}] DB数据不足({existing_count}/{desired_bars})，重新全量拉取")
-        if primary_source == "hyperliquid":
-            klines_new = fetch_klines_from_now(fetch_hyperliquid_klines, symbol, interval, desired_bars)
-            if klines_new: actual_source = "hyperliquid"
-        if not klines_new:
-            klines_new = fetch_klines_from_now(fetch_binance_spot_klines, symbol, interval, desired_bars)
-            if klines_new: actual_source = "binance_spot"
-        if not klines_new:
-            klines_new = fetch_klines_from_now(fetch_gateio_spot_klines, symbol, interval, desired_bars)
-            if klines_new: actual_source = "gate_spot"
+            for src in sources_to_try:
+                klines_new = _fetch_from_source_range(src, symbol, interval, 5000, fetch_start, now_ms)
+                if klines_new:
+                    actual_source = src
+                    set_source_override(symbol, interval, src)
+                    break
 
     if klines_new:
-        upsert_klines(symbol, interval, klines_new, source=actual_source)
+        upsert_klines(symbol, interval, klines_new, source=actual_source or "unknown")
 
     klines_all = load_klines(symbol, interval, desired_bars, source=None)
     if len(klines_all) >= 50:
         return klines_all, {
-            "primary": primary_source, "actual": actual_source,
-            "mixed": primary_source != actual_source,
+            "primary": primary_source, "actual": actual_source or "cached",
+            "mixed": primary_source != (actual_source or "cached"),
             "primary_count": len(klines_all),
         }
 
     fallback = klines_new or []
     return fallback, {
-        "primary": primary_source, "actual": actual_source,
+        "primary": primary_source, "actual": actual_source or "unknown",
         "mixed": False, "primary_count": len(fallback),
     }
 
@@ -572,9 +610,9 @@ def build_market_data(symbol, asset_type):
         klines_1d_direct, _ = fetch_and_cache_klines(symbol, asset_type, "1d", 400)
         if klines_1d_direct:
             klines_1d = klines_1d_direct
-            log.info(f"[{symbol}][1d] 直接拉取成功，共 {len(klines_1d)} 根")
+            log.info(f"[{symbol}][1d] 数据就绪，共 {len(klines_1d)} 根")
     except Exception as e:
-        log.warning(f"[{symbol}][1d] 直接拉取失败（将降级从4H聚合）：{type(e).__name__}: {e}")
+        log.warning(f"[{symbol}][1d] 拉取失败（将降级从4H聚合）：{type(e).__name__}: {e}")
 
     if len(klines_1d) < 50:
         klines_1d_agg = aggregate_klines(klines_4h, 6)
