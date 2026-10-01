@@ -1,17 +1,18 @@
 name: 清理过期数据库缓存
+
 on:
   schedule:
-    - cron: '0 3 * * 0'   # 每周日 03:00 UTC 自动执行
-  workflow_dispatch:       # 也支持手动触发
+    - cron: '0 3 * * 0'   # 每周日 03:00 UTC
+  workflow_dispatch:
 
 permissions:
-  actions: write           # 需要写权限才能删除缓存
+  actions: write
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: 删除重复缓存，只保留最新
+      - name: 只保留最新一个缓存
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -23,24 +24,27 @@ jobs:
           total=$(echo "$all_caches" | jq 'length')
           echo "当前缓存总数: $total"
 
-          # 按 key 分组，每组按创建时间倒序，保留第一个（最新），其余待删除
+          # 全局按创建时间倒序排序，保留第一个（最新），其余全部删除
           to_delete=$(echo "$all_caches" | jq -r '
-            group_by(.key)[]
-            | sort_by(.created_at) | reverse
+            sort_by(.created_at) | reverse
             | .[1:][]
             | "\(.id)\t\(.key[:60])\t\(.size_in_bytes)"
           ')
 
           if [ -z "$to_delete" ]; then
-            echo "没有重复缓存，无需清理。"
+            echo "只有 1 个缓存，无需清理。"
             exit 0
           fi
+
+          delete_count=$(echo "$to_delete" | wc -l)
+          echo "计划删除 $delete_count 个旧缓存，保留最新 1 个"
 
           deleted=0
           freed=0
           while IFS=$'\t' read -r cache_id key size; do
+            [ -z "$cache_id" ] && continue
             mb=$(( size / 1048576 ))
-            echo "正在删除 [$cache_id] ${key}... (${mb}MB)"
+            echo "删除 [$cache_id] ${key}... (${mb}MB)"
             if gh api --method DELETE "repos/$REPO/actions/caches/$cache_id" 2>/dev/null; then
               deleted=$((deleted + 1))
               freed=$((freed + size))
@@ -50,4 +54,4 @@ jobs:
           done <<< "$to_delete"
 
           echo ""
-          echo "完成: 删除 $deleted 个重复缓存，释放 $(( freed / 1048576 ))MB。"
+          echo "完成: 删除 $deleted 个旧缓存，释放 $(( freed / 1048576 ))MB。"
