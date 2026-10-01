@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-报告生成器 - 整改版
-=========================
-1. 所有板块从 global_judgment 读取，逻辑100%自洽
-2. 市场状态合并为一个板块
-3. 新增轨道状态面板、警告提示、信号有效期
-4. 动态话术生成
+报告生成器 - 压力位雷达 + 智能价格格式化
 """
 from datetime import datetime, timezone, timedelta
 import os
 import json
 import random
+import time as _time
 
 from report_lexicon import (
     TREND_MAP, MOMENTUM_4H_MAP, RSI_DIV_MAP, REGIME_MAP,
@@ -23,9 +19,42 @@ from report_lexicon import (
 BJT = timezone(timedelta(hours=8))
 HISTORY_FILE = "logs/subject_history.json"
 HISTORY_SIZE = 20
-
 COMMENT_HISTORY_FILE = "logs/comment_history.json"
 COMMENT_HISTORY_SIZE = 500
+
+
+# ============================================================
+# 🚀 智能价格格式化（按量级自动调整小数位）
+# ============================================================
+def fmt_price(p):
+    """
+    按价格量级智能格式化，保留 4-6 位有效数字，不带千位分隔符。
+    - BTC 83935   → "83935.00"
+    - ETH 2700.5  → "2700.5000"
+    - DOGE 0.1534 → "0.15340"
+    - PEPE 0.0000089 → "0.00000890"
+    """
+    if p is None:
+        return "N/A"
+    try:
+        p = float(p)
+        if p == 0:
+            return "0"
+        ap = abs(p)
+        if ap >= 1000:
+            return f"{p:.2f}"
+        elif ap >= 1:
+            return f"{p:.4f}"
+        elif ap >= 0.01:
+            return f"{p:.5f}"
+        elif ap >= 0.0001:
+            return f"{p:.6f}"
+        elif ap >= 0.000001:
+            return f"{p:.8f}"
+        else:
+            return f"{p:.10f}"
+    except (TypeError, ValueError):
+        return str(p)
 
 
 # ============================================================
@@ -40,10 +69,12 @@ def translate_trend(t):
 
 
 def _fmt_num(v, fmt=".1f", default="N/A"):
-    if v is None: return default
+    if v is None:
+        return default
     try:
         f = float(v)
-        if f != f: return default
+        if f != f:
+            return default
         return format(f, fmt)
     except (TypeError, ValueError):
         return default
@@ -51,7 +82,8 @@ def _fmt_num(v, fmt=".1f", default="N/A"):
 
 def _load_json_history(path, default=None):
     try:
-        if not os.path.exists(path): return default if default is not None else []
+        if not os.path.exists(path):
+            return default if default is not None else []
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else (default if default is not None else [])
@@ -130,6 +162,7 @@ SIGNAL_GLOSSARY = {
     "ATR": "波动幅度，用于止损和仓位计算。",
     "波动率熔断": "ATR/价格 > 3% 时，所有轨道暂停，等市场平静。",
     "轨道3独立": "暴跌反弹轨道不受市场状态机约束，但触发条件极严（4/4）。",
+    "压力位雷达": "30m/4H 前高，帮助判断上方压力强度。",
 }
 
 AD_BANNER = """
@@ -155,12 +188,7 @@ def _fmt_data_range(klines, label):
 
 
 def render_multi_tf_panel(md, active_sr=None):
-    """
-    多周期面板
-    - 接收 active_sr 以便获取 momentum_4h（策略结果里才有）
-    """
     trend_1d = md.get("trend_1d")
-    # 🚀 修复：优先从策略结果里拿 momentum_4h，取不到再回退
     momentum_4h = None
     if active_sr:
         momentum_4h = active_sr.get("momentum_4h")
@@ -173,32 +201,30 @@ def render_multi_tf_panel(md, active_sr=None):
     ema50_1d = md.get("ema50_1d"); ema20_4h = md.get("ema20_4h"); ema50_4h = md.get("ema50_4h")
     price = md.get("current_price"); rsi_div = md.get("rsi_div_1h")
     rsi_30m = md.get("rsi"); ma10_30m = md.get("ma10"); adx_30m = md.get("adx")
-    
 
     day_signal = "N/A"
     if ema50_1d:
         pos = "上方" if (price and price > ema50_1d) else "下方"
-        day_signal = f"EMA50={ema50_1d:.4f} | 价格{pos}"
+        day_signal = f"EMA50={fmt_price(ema50_1d)} | 价格{pos}"
 
     h4_list = []
-    if ema20_4h: h4_list.append(f"EMA20={ema20_4h:.4f}")
-    if ema50_4h: h4_list.append(f"EMA50={ema50_4h:.4f}")
+    if ema20_4h: h4_list.append(f"EMA20={fmt_price(ema20_4h)}")
+    if ema50_4h: h4_list.append(f"EMA50={fmt_price(ema50_4h)}")
     if macd_4h.get("hist") is not None:
         h4_list.append(f"MACD柱={'正' if macd_4h['hist'] > 0 else '负'}")
     h4_signal = " | ".join(h4_list) if h4_list else "N/A"
 
     h1_list = []
-    if boll_1h.get("mid"): h1_list.append(f"BOLL中轨={boll_1h['mid']:.4f}")
+    if boll_1h.get("mid"): h1_list.append(f"BOLL中轨={fmt_price(boll_1h['mid'])}")
     if kdj_1h.get("j") is not None: h1_list.append(f"KDJ J={kdj_1h['j']:.1f}")
     if rsi_div: h1_list.append(f"RSI背离={RSI_DIV_MAP.get(rsi_div, '无背离')}")
     h1_signal = " | ".join(h1_list) if h1_list else "N/A"
 
     m30_list = []
-    if ma10_30m: m30_list.append(f"MA10={ma10_30m:.4f}")
+    if ma10_30m: m30_list.append(f"MA10={fmt_price(ma10_30m)}")
     if adx_30m is not None: m30_list.append(f"ADX={adx_30m:.1f}")
     m30_signal = " | ".join(m30_list) if m30_list else "N/A"
 
-    # 30m 和 1H 趋势：用价格相对位置
     h1_trend = "neutral"
     if price and boll_1h.get("mid"):
         if price > boll_1h["mid"] * 1.005: h1_trend = "up"
@@ -218,7 +244,6 @@ def render_multi_tf_panel(md, active_sr=None):
     html += "<table style='width:100%; font-size:13px; border-collapse:collapse;'>"
     html += "<tr style='background:#e8e8e8;'><th style='padding:6px; text-align:left;'>周期</th><th style='padding:6px;'>趋势</th><th style='padding:6px;'>RSI</th><th style='padding:6px;'>关键位/信号</th></tr>"
     html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>📅 日线</td><td style='text-align:center;'>{translate_trend(trend_1d)}</td><td style='text-align:center;'>{_fmt_num(rsi_1d)}</td><td style='text-align:center; font-size:12px;'>{day_signal}</td></tr>"
-    # 🚀 4H 行显示 momentum 中文
     h4_trend_display = MOMENTUM_4H_MAP.get(momentum_4h, "❓ 未知")
     html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>⏰ 4小时</td><td style='text-align:center;'>{h4_trend_display}</td><td style='text-align:center;'>{_fmt_num(rsi_4h)}</td><td style='text-align:center; font-size:12px;'>{h4_signal}</td></tr>"
     html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>🕐 1小时</td><td style='text-align:center;'>{translate_trend(h1_trend)}</td><td style='text-align:center;'>{_fmt_num(rsi_1h)}</td><td style='text-align:center; font-size:12px;'>{h1_signal}</td></tr>"
@@ -236,10 +261,85 @@ def render_multi_tf_panel(md, active_sr=None):
 
 
 # ============================================================
-# 🚀 市场状态板块（合并行情阶段 + 市场状态）
+# 🚀 压力位雷达（30m + 4H）
+# ============================================================
+def render_pressure_radar(md):
+    cp = md.get("current_price")
+    if not cp or cp <= 0:
+        return ""
+
+    def fmt_ago(ts_ms):
+        if not ts_ms: return "时间未知"
+        try:
+            diff_h = (_time.time() - ts_ms / 1000) / 3600
+            if diff_h < 1: return "刚刚"
+            if diff_h < 24: return f"{int(diff_h)} 小时前"
+            return f"{int(diff_h / 24)} 天前"
+        except Exception:
+            return "时间未知"
+
+    def impact_level(dist_pct, period):
+        if period == "30m":
+            if dist_pct < 3: return "🔴 极强"
+            if dist_pct < 5: return "🟠 强"
+            if dist_pct < 8: return "🟡 中"
+            return None
+        else:  # 4H
+            if dist_pct < 3: return "🟠 强"
+            if dist_pct < 5: return "🟡 中"
+            if dist_pct < 8: return "🟢 弱"
+            return None
+
+    rows = []
+
+    # 30m 前高
+    rh = md.get("recent_high"); rh_ts = md.get("recent_high_ts")
+    if rh and rh > cp:
+        dist = (rh - cp) / cp * 100
+        level = impact_level(dist, "30m")
+        if level:
+            rows.append({"period": "30m", "span": "近 4 天",
+                         "price": rh, "ago": fmt_ago(rh_ts),
+                         "dist": dist, "level": level})
+
+    # 4H 前高
+    rh4 = md.get("recent_high_4h"); rh4_ts = md.get("recent_high_4h_ts")
+    if rh4 and rh4 > cp:
+        dist = (rh4 - cp) / cp * 100
+        level = impact_level(dist, "4h")
+        if level:
+            rows.append({"period": "4H", "span": "近 33 天",
+                         "price": rh4, "ago": fmt_ago(rh4_ts),
+                         "dist": dist, "level": level})
+
+    if not rows:
+        return ""
+
+    html = (
+        "<div style='margin: 12px 15px; padding: 12px 15px; background: #fff; "
+        "border-left: 4px solid #e67e22; border-radius: 0 8px 8px 0; "
+        "box-shadow: 0 1px 4px rgba(0,0,0,0.04);'>"
+        f"<p style='margin: 0 0 8px 0; font-weight: bold; color: #e67e22; font-size: 14px;'>"
+        f"📡 压力位雷达（当前价 ${fmt_price(cp)}）</p>"
+    )
+    for r in rows:
+        html += (
+            "<p style='margin: 5px 0; font-size: 13px; color: #333; line-height: 1.6;'>"
+            f"<b>{r['level']}</b> &nbsp;"
+            f"<b>{r['period']}</b> 前高："
+            f"<b style='color:#c0392b;'>${fmt_price(r['price'])}</b> "
+            f"<span style='color:#888; font-size:12px;'>（{r['span']}，{r['ago']}形成）</span>"
+            f" &nbsp;—— 距当前 <b style='color:#e67e22;'>+{r['dist']:.2f}%</b>"
+            "</p>"
+        )
+    html += "</div>"
+    return html
+
+
+# ============================================================
+# 市场状态面板
 # ============================================================
 def render_global_state_panel(active_sr, md):
-    """统一的市场状态面板"""
     regime = active_sr.get("regime") if active_sr else None
     momentum_4h = active_sr.get("momentum_4h") if active_sr else None
     regime_desc = active_sr.get("regime_desc") if active_sr else None
@@ -256,7 +356,6 @@ def render_global_state_panel(active_sr, md):
     momentum_cn = MOMENTUM_4H_MAP.get(momentum_4h, "未知")
     track_names = {"track_1": "底部突破", "track_2": "做空", "track_3": "暴跌反弹", "track_4": "趋势回踩"}
 
-    # 波动率水平
     if atr_pct > 3:
         vol_label = f"🔴 极端 {atr_pct:.1f}%"
     elif atr_pct > 2:
@@ -277,7 +376,6 @@ def render_global_state_panel(active_sr, md):
     if forbidden:
         forbidden_str = "、".join([track_names.get(t, t) for t in forbidden])
         html += f"<p style='margin:5px 0; font-size:13px; color:#e74c3c;'>❌ 禁止轨道：{forbidden_str}</p>"
-    # 轨道3 特别提示
     html += f"<p style='margin:5px 0; font-size:12px; color:#8e44ad;'>💡 暴跌反弹（轨道3）为独立轨道，不受状态机约束，但需 4/4 全满足才触发</p>"
 
     if warnings:
@@ -290,96 +388,10 @@ def render_global_state_panel(active_sr, md):
 
     html += "</div>"
     return html
-    
-def render_pressure_radar(md):
-    """
-    30m + 4H 双周期压力位雷达。
-    - 30m：短期压力，影响轨道2 A1 条件
-    - 4H：中期压力，判断是否冲顶
-    """
-    import time as _time
-    cp = md.get("current_price")
-    if not cp or cp <= 0:
-        return ""
 
-    def fmt_ago(ts_ms):
-        if not ts_ms:
-            return "时间未知"
-        try:
-            diff_h = (_time.time() - ts_ms / 1000) / 3600
-            if diff_h < 1:
-                return "刚刚"
-            if diff_h < 24:
-                return f"{int(diff_h)} 小时前"
-            return f"{int(diff_h / 24)} 天前"
-        except Exception:
-            return "时间未知"
-
-    def impact_level(dist_pct, period):
-        if period == "30m":
-            if dist_pct < 3: return "🔴 极强"
-            if dist_pct < 5: return "🟠 强"
-            if dist_pct < 8: return "🟡 中"
-            return None
-        else:  # 4H
-            if dist_pct < 3: return "🟠 强"
-            if dist_pct < 5: return "🟡 中"
-            if dist_pct < 8: return "🟢 弱"
-            return None
-
-    rows = []
-
-    # 30m 前高（近 4 天）
-    rh = md.get("recent_high")
-    rh_ts = md.get("recent_high_ts")
-    if rh and rh > cp:
-        dist = (rh - cp) / cp * 100
-        level = impact_level(dist, "30m")
-        if level:
-            rows.append({
-                "period": "30m", "span": "近 4 天",
-                "price": rh, "ago": fmt_ago(rh_ts),
-                "dist": dist, "level": level,
-            })
-
-    # 4H 前高（近 33 天）
-    rh4 = md.get("recent_high_4h")
-    rh4_ts = md.get("recent_high_4h_ts")
-    if rh4 and rh4 > cp:
-        dist = (rh4 - cp) / cp * 100
-        level = impact_level(dist, "4h")
-        if level:
-            rows.append({
-                "period": "4H", "span": "近 33 天",
-                "price": rh4, "ago": fmt_ago(rh4_ts),
-                "dist": dist, "level": level,
-            })
-
-    if not rows:
-        return ""
-
-    html = (
-        "<div style='margin: 12px 15px; padding: 12px 15px; background: #fff; "
-        "border-left: 4px solid #e67e22; border-radius: 0 8px 8px 0; "
-        "box-shadow: 0 1px 4px rgba(0,0,0,0.04);'>"
-        "<p style='margin: 0 0 8px 0; font-weight: bold; color: #e67e22; font-size: 14px;'>"
-        "📡 压力位雷达（当前价 $" + f"{cp:.4f}" + "）</p>"
-    )
-    for r in rows:
-        html += (
-            "<p style='margin: 5px 0; font-size: 13px; color: #333; line-height: 1.6;'>"
-            f"<b>{r['level']}</b> &nbsp;"
-            f"<b>{r['period']}</b> 前高："
-            f"<b style='color:#c0392b;'>${r['price']:.4f}</b> "
-            f"<span style='color:#888; font-size:12px;'>（{r['span']}，{r['ago']}形成）</span>"
-            f" &nbsp;—— 距当前 <b style='color:#e67e22;'>+{r['dist']:.2f}%</b>"
-            "</p>"
-        )
-    html += "</div>"
-    return html
 
 # ============================================================
-# 🚀 轨道状态面板（4 轨道一览）
+# 轨道状态面板
 # ============================================================
 def render_track_status_panel(sr):
     if not sr: return ""
@@ -441,18 +453,18 @@ def render_entry_plan(entry_plan, direction, cp, md):
         html += f"<td style='padding:6px; text-align:center;'>第{i}档</td>"
         html += f"<td style='padding:6px; text-align:center; font-weight:bold;'>{s['weight']}%</td>"
         html += f"<td style='padding:6px; text-align:center; color:{type_color}; font-weight:bold;'>{type_label}</td>"
-        html += f"<td style='padding:6px; text-align:center;'>${s['price']:.4f}</td>"
+        html += f"<td style='padding:6px; text-align:center;'>${fmt_price(s['price'])}</td>"
         html += f"<td style='padding:6px; font-size:12px; color:#666;'>{s['note']}</td></tr>"
     html += "</table>"
 
-    html += f"<p style='margin-top:12px;'><b>加权平均{'买入' if is_spot else '入场'}价：</b><span style='color:#e67e22; font-weight:bold;'>${avg_price:.4f}</span></p>"
+    html += f"<p style='margin-top:12px;'><b>加权平均{'买入' if is_spot else '入场'}价：</b><span style='color:#e67e22; font-weight:bold;'>${fmt_price(avg_price)}</span></p>"
     if stop:
         risk_pct = abs(avg_price - stop) / avg_price
         if is_spot:
             max_loss = 200
             position_value = min(10000, max_loss / risk_pct) if risk_pct > 0 else 10000
             coin_amount = position_value / avg_price if avg_price else 0
-            html += f"<p><b>止损触发价：</b><span style='color:#d32f2f; font-weight:bold;'>${stop:.4f}</span></p>"
+            html += f"<p><b>止损触发价：</b><span style='color:#d32f2f; font-weight:bold;'>${fmt_price(stop)}</span></p>"
             html += f"<p><b>止损空间：</b>{risk_pct*100:.2f}%</p>"
             html += f"<p><b>🛡️ 现货2%规则（本金10000U）：</b>建议买入 <b>{position_value:.2f} USDT</b>，"
             html += f"对应 <b>{coin_amount:.4f} 个 {md.get('symbol','').replace('_USDT','')}</b>。</p>"
@@ -461,7 +473,7 @@ def render_entry_plan(entry_plan, direction, cp, md):
             position_value = 10000 * position_pct
             margin_10x = position_value / 10
             coin_amount = position_value / avg_price if avg_price else 0
-            html += f"<p><b>硬止损价：</b><span style='color:#d32f2f; font-weight:bold;'>${stop:.4f}</span></p>"
+            html += f"<p><b>硬止损价：</b><span style='color:#d32f2f; font-weight:bold;'>${fmt_price(stop)}</span></p>"
             html += f"<p><b>止损空间：</b>{risk_pct*100:.2f}%</p>"
             html += f"<p><b>🛡️ 2%资金管理（本金10000U）：</b>最大总仓位 <b>{position_value:.2f} USDT</b>。"
             html += f"10倍杠杆下，投入保证金 <b>{margin_10x:.2f} USDT</b>，总开仓数量 <b>{coin_amount:.4f} 个</b>。</p>"
@@ -476,12 +488,12 @@ def render_entry_plan(entry_plan, direction, cp, md):
                 tp2 = avg_price - abs(stop - avg_price) * 2.0
                 tp3 = avg_price - abs(stop - avg_price) * 3.0
             html += "<p><b>📐 三段式移动止盈：</b><br>"
-            html += f"1️⃣ 价格到 <b>${tp1:.4f}</b> 时，止损移至成本价 ${avg_price:.4f}<br>"
-            html += f"2️⃣ 价格到 <b>${tp2:.4f}</b> 时，止损移至 ${tp1:.4f}<br>"
-            html += f"3️⃣ 价格到 <b>${tp3:.4f}</b> 时，止损移至 ${tp2:.4f}，止盈50%仓位</p>"
+            html += f"1️⃣ 价格到 <b>${fmt_price(tp1)}</b> 时，止损移至成本价 ${fmt_price(avg_price)}<br>"
+            html += f"2️⃣ 价格到 <b>${fmt_price(tp2)}</b> 时，止损移至 ${fmt_price(tp1)}<br>"
+            html += f"3️⃣ 价格到 <b>${fmt_price(tp3)}</b> 时，止损移至 ${fmt_price(tp2)}，止盈50%仓位</p>"
 
     ma10_val = md.get('ma10')
-    ma10_str = f"${ma10_val:.4f}" if isinstance(ma10_val, (int, float)) else "N/A"
+    ma10_str = f"${fmt_price(ma10_val)}" if isinstance(ma10_val, (int, float)) else "N/A"
     html += f"<p><b>MA10动态离场线：</b>{ma10_str}</p>"
     html += "</div>"
     return html
@@ -580,10 +592,10 @@ def build_hotspot_section(hotspot):
 def build_symbol_block(r):
     md = r.get("market_data", {})
     cp = r.get("current_price")
-    cp_str = f"${cp:.4f}" if isinstance(cp, (int, float)) else "N/A"
+    cp_str = f"${fmt_price(cp)}" if isinstance(cp, (int, float)) else "N/A"
     is_spot = md.get("data_mode") == "spot"
 
-    # 🚀 修复：提前定义常用指标变量，供后续"未触发"分支使用
+    # 🚀 提前定义变量，供"未触发"分支使用（修复 NameError）
     rsi = md.get("rsi")
     rsi_1h = md.get("rsi_1h")
     adx = md.get("adx")
@@ -593,7 +605,6 @@ def build_symbol_block(r):
         if sr_obj and sr_obj.get("error"):
             return build_error_card(r, sr_obj["error"])
 
-    # 找触发的策略
     triggered_direction = None
     active_sr = None
     for sname, sr_obj in r.get("strategy_results", {}).items():
@@ -603,14 +614,16 @@ def build_symbol_block(r):
             break
     if not active_sr:
         for sname, sr_obj in r.get("strategy_results", {}).items():
-            if sr_obj: active_sr = sr_obj; break
+            if sr_obj:
+                active_sr = sr_obj
+                break
 
     is_triggered = triggered_direction is not None
 
-    # 卡片样式
     if is_triggered:
         if triggered_direction == "spot_warning":
-            border_color = "#e67e22"; header_bg = "linear-gradient(135deg, #e67e22 0%, #d35400 100%)"
+            border_color = "#e67e22"
+            header_bg = "linear-gradient(135deg, #e67e22 0%, #d35400 100%)"
             badge_text = "🟢 现货逃顶"; badge_bg = "#f39c12"; badge_color = "#fff"
             track_name = "🟢 现货逃顶预警（建议减仓）"; track_key = "track_2"
         elif triggered_direction == "short":
@@ -640,7 +653,6 @@ def build_symbol_block(r):
         border_color = "#34495e"; header_bg = "linear-gradient(135deg, #2c3e50 0%, #1a252f 100%)"
         badge_text = "🔮 盘面推演"; badge_bg = "#95a5a6"; badge_color = "#fff"
 
-    # 头部信息
     data_source = md.get('data_source') or '未知数据源'
     if is_spot:
         header_info = f"<div><b>当前价格：</b><span style='color:{border_color};font-size:1.2em;font-weight:bold;'>{cp_str}</span></div><div><b>模式：</b>现货 ⚠️</div>"
@@ -664,15 +676,9 @@ def build_symbol_block(r):
         </div>
     """
 
-    # 市场状态面板
     html += render_global_state_panel(active_sr, md)
-    # 🚀 压力位雷达
     html += render_pressure_radar(md)
-
-    # 多周期面板
     html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md, active_sr)}</div>"
-
-    # 轨道状态面板
     html += f"<div style='padding: 0 20px;'>{render_track_status_panel(active_sr)}</div>"
 
     if is_triggered:
@@ -694,7 +700,6 @@ def build_symbol_block(r):
         elif entry_plan:
             html += render_entry_plan(entry_plan, triggered_direction, cp, md)
 
-        # 🚀 参谋长解读（动态生成）
         history = _load_json_history(COMMENT_HISTORY_FILE)
         comment = generate_dynamic_comment(r["symbol"], triggered_direction, md, entry_plan,
                                             reason=active_sr.get("reason", ""), history=history)
@@ -705,7 +710,6 @@ def build_symbol_block(r):
     else:
         html += f"<div style='padding: 20px;'>"
         html += "<p style='color:#666; font-size:15px;'>当前标的尚未触发开枪信号，以下是各轨道的推演情况：</p>"
-        # 显示未触发时的 4 轨道详情
         for tk, tn in [("track_1", "🚀 底部突破做多"),
                        ("track_2", "🔪 见顶做空 + 📉 顺势做空"),
                        ("track_3", "🩸 暴跌反弹做多（独立）"),
@@ -723,7 +727,6 @@ def build_symbol_block(r):
                 html += "</ul>"
             html += "</div>"
 
-        # 未触发时的参谋长点评（简化版）
         gj = active_sr.get("global_judgment", {}) if active_sr else {}
         warnings = gj.get("warnings", [])
         regime = active_sr.get("regime") if active_sr else None
@@ -839,8 +842,8 @@ def generate_dynamic_subject(triggered_list, untriggered_list, results, hotspot=
                 md = r.get("market_data", {})
                 rsi_v = _fmt_pct(md.get("rsi"))
                 adx_v = _fmt_pct(md.get("adx"))
-                ma10 = md.get("ma10"); cp = md.get("current_price")
-                if ma10: anchor = f"MA10 {ma10:.4f}"
+                ma10 = md.get("ma10")
+                if ma10: anchor = f"MA10 {fmt_price(ma10)}"
                 break
             is_short = any(d == "short" for d in all_directions)
             pool = SUBJECT_POOL["single_trigger_short"] if is_short else SUBJECT_POOL["single_trigger_long"]
@@ -874,7 +877,6 @@ def build_report(results, active_strategies, watchlist, hotspot=None):
     now = datetime.now(BJT)
     now_str = now.strftime("%Y-%m-%d %H:%M")
 
-    # 信号有效期（下一个 30m 收盘）
     if now.minute < 30:
         valid_until = now.replace(minute=30, second=0, microsecond=0)
     else:
