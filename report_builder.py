@@ -261,34 +261,48 @@ def render_multi_tf_panel(md, active_sr=None):
 
 
 # ============================================================
-# 🚀 压力位雷达（30m + 4H）
+# 🚀 压力位雷达（30m + 4H）- P3 修复：4H 前高始终显示
 # ============================================================
 def render_pressure_radar(md):
+    """
+    双周期压力位雷达：
+    - 30m：短期压力（4 天窗口），超过 15% 不显示
+    - 4H：中期压力（33 天窗口），超过 15% 不显示
+    - 🚀 P3: 阈值内始终显示，用颜色区分影响力，不再因距离远而"消失"
+    """
     cp = md.get("current_price")
     if not cp or cp <= 0:
         return ""
 
     def fmt_ago(ts_ms):
-        if not ts_ms: return "时间未知"
+        if not ts_ms:
+            return "时间未知"
         try:
             diff_h = (_time.time() - ts_ms / 1000) / 3600
-            if diff_h < 1: return "刚刚"
-            if diff_h < 24: return f"{int(diff_h)} 小时前"
+            if diff_h < 1:
+                return "刚刚"
+            if diff_h < 24:
+                return f"{int(diff_h)} 小时前"
             return f"{int(diff_h / 24)} 天前"
         except Exception:
             return "时间未知"
 
     def impact_level(dist_pct, period):
+        """
+        🚀 P3: 阈值内始终返回等级，超过阈值返回 None（不显示）。
+        """
         if period == "30m":
             if dist_pct < 3: return "🔴 极强"
             if dist_pct < 5: return "🟠 强"
             if dist_pct < 8: return "🟡 中"
-            return None
+            if dist_pct < 15: return "🟢 弱"
+            return None  # 超过 15% 不显示
         else:  # 4H
             if dist_pct < 3: return "🟠 强"
             if dist_pct < 5: return "🟡 中"
             if dist_pct < 8: return "🟢 弱"
-            return None
+            if dist_pct < 15: return "⚪ 极弱"
+            return None  # 超过 15% 不显示
 
     rows = []
 
