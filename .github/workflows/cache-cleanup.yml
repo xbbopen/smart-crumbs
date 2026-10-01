@@ -2,8 +2,15 @@ name: 清理过期数据库缓存
 
 on:
   schedule:
-    - cron: '0 3 * * 0'   # 每周日 03:00 UTC
+    # 每天北京时间 03:17（UTC 19:17）自动执行
+    - cron: '17 19 * * *'
   workflow_dispatch:
+
+# 🚀 与 monitor / backtest / bootstrap 共用同一把锁
+# 确保清理时，监控/回测绝对不会同时运行
+concurrency:
+  group: market-db-lock
+  cancel-in-progress: false
 
 permissions:
   actions: write
@@ -17,6 +24,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
+          echo "=== 缓存清理开始 ==="
+          echo "当前时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC') / $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST')"
+          echo ""
+
           echo "正在获取所有缓存..."
           all_caches=$(gh api "repos/$REPO/actions/caches?per_page=100" \
             --paginate \
@@ -38,6 +49,7 @@ jobs:
 
           delete_count=$(echo "$to_delete" | wc -l)
           echo "计划删除 $delete_count 个旧缓存，保留最新 1 个"
+          echo ""
 
           deleted=0
           failed=0
@@ -57,7 +69,11 @@ jobs:
           done <<< "$to_delete"
 
           echo ""
-          echo "完成: 成功删除 $deleted 个，失败 $failed 个，释放 $(( freed / 1048576 ))MB。"
+          echo "=== 清理完成 ==="
+          echo "成功删除: $deleted 个"
+          echo "失败: $failed 个"
+          echo "释放空间: $(( freed / 1048576 ))MB"
           if [ $failed -gt 0 ]; then
-            echo "提示: 失败的缓存会在下次定时运行时自动重试。"
+            echo ""
+            echo "提示: 失败的缓存会在明天凌晨自动重试。"
           fi
