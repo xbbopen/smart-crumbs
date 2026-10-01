@@ -3,6 +3,10 @@ name: 历史数据初始化
 on:
   workflow_dispatch:
 
+concurrency:
+  group: market-db-lock
+  cancel-in-progress: false
+
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
@@ -13,7 +17,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 尝试恢复已有 DB（如果有，会跳过已拉取的标的）
+      # 从 Cache 恢复数据库
       - name: 恢复数据库
         uses: actions/cache@v4
         with:
@@ -41,6 +45,7 @@ jobs:
           print(f'压缩后: {db_size_mb():.2f} MB')
           "
 
+      # 把更新后的 DB 存回 Cache
       - name: 保存数据库到 Cache
         uses: actions/cache@v4
         with:
