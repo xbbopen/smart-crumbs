@@ -394,9 +394,12 @@ class V1DefaultStrategy(BaseStrategy):
             tf_core = 0; tf_aux = 0
             if ema20_4h and ema50_4h and ema20_4h < ema50_4h:
                 tf_core += 1
-                result["track_2"]["details"]["B1.4H空头结构"] = "✅ EMA20<EMA50"
+                result["track_2"]["details"]["B1.4H空头结构"] = f"✅ EMA20={ema20_4h:.4f} < EMA50={ema50_4h:.4f}"
             else:
-                result["track_2"]["details"]["B1.4H空头结构"] = "❌ 未形成"
+                if ema20_4h and ema50_4h:
+                    result["track_2"]["details"]["B1.4H空头结构"] = f"❌ 未形成（EMA20={ema20_4h:.4f} > EMA50={ema50_4h:.4f}）"
+                else:
+                    result["track_2"]["details"]["B1.4H空头结构"] = "❌ 数据不足（缺少 EMA20 或 EMA50）"
             if boll_mid:
                 dist = (price - boll_mid) / boll_mid
                 if dist >= -0.005:
@@ -425,9 +428,9 @@ class V1DefaultStrategy(BaseStrategy):
                     result["track_2"]["details"]["B4.30m反弹遇阻"] = "❌ 未见"
             if macd_1h.get("dif") is not None and macd_1h.get("dea") is not None and macd_1h["dif"] < macd_1h["dea"]:
                 tf_aux += 1
-                result["track_2"]["details"]["B5.1H MACD空头"] = "✅ DIF<DEA"
+                result["track_2"]["details"]["B5.1H MACD空头"] = f"✅ DIF={macd_1h['dif']:.4f} < DEA={macd_1h['dea']:.4f}"
             else:
-                result["track_2"]["details"]["B5.1H MACD空头"] = "❌ 未死叉"
+                result["track_2"]["details"]["B5.1H MACD空头"] = "❌ 1H MACD未死叉"
             if rsi < 60:
                 tf_aux += 1
                 result["track_2"]["details"]["B6.30m RSI未超买"] = f"✅ RSI={rsi_str}"
