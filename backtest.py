@@ -1135,8 +1135,19 @@ def main():
     now_str = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     subject = f"【参谋长分层回测】{now_str} | {len(all_reports)}标的 | {with_trades}个有交易"
 
+    # 🚀 生成合并的 CSV 附件
     try:
-        send_html_email(subject, html)
+        csv_content = _generate_trades_csv(all_reports)
+        csv_filename = f"backtest_trades_{datetime.now(BJT).strftime('%Y%m%d_%H%M')}.csv"
+        attachments = [(csv_filename, csv_content.encode("utf-8"), "text/csv")]
+        total_trades = sum(len(r.get("trades", [])) for r in all_reports)
+        print(f"\n📎 已生成 CSV 附件：{csv_filename}（{total_trades} 笔交易）")
+    except Exception as e:
+        print(f"\n⚠️ CSV 生成失败（将只发 HTML）：{e}")
+        attachments = None
+
+    try:
+        send_html_email(subject, html, attachments=attachments)
         print("\n📧 回测报告已发送")
     except Exception as e:
         print(f"\n❌ 邮件发送失败：{e}")
