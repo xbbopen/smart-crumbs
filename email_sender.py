@@ -27,9 +27,15 @@ def _require_env(name: str) -> str:
 
 def _build_message(subject: str, html: str, smtp_user: str, recipient: str) -> MIMEMultipart:
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = Header(subject.replace('\n', ' ').replace('\r', '').strip(), 'utf-8')
+    msg['Subject'] = Header(subject, 'utf-8')
     msg['From'] = smtp_user
     msg['To'] = recipient
+    
+    # 🚀 显式写入北京时间，避免 163 等邮箱客户端时区解析错误
+    from datetime import datetime, timezone, timedelta
+    BJT = timezone(timedelta(hours=8))
+    msg['Date'] = datetime.now(BJT).strftime('%a, %d %b %Y %H:%M:%S +0800')
+    
     msg.attach(MIMEText(html, 'html', 'utf-8'))
     return msg
 
