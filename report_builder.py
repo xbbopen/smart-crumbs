@@ -154,15 +154,26 @@ def _fmt_data_range(klines, label):
         return f"{label} {len(klines)}根"
 
 
-def render_multi_tf_panel(md):
+def render_multi_tf_panel(md, active_sr=None):
+    """
+    多周期面板
+    - 接收 active_sr 以便获取 momentum_4h（策略结果里才有）
+    """
     trend_1d = md.get("trend_1d")
-    momentum_4h = md.get("momentum_4h")  # 🚀 用统一值
+    # 🚀 修复：优先从策略结果里拿 momentum_4h，取不到再回退
+    momentum_4h = None
+    if active_sr:
+        momentum_4h = active_sr.get("momentum_4h")
+    if momentum_4h is None:
+        momentum_4h = md.get("momentum_4h")
+
     rsi_1h = md.get("rsi_1h"); rsi_4h = md.get("rsi_4h"); rsi_1d = md.get("rsi_1d")
     kdj_1h = md.get("kdj_1h") or {}; boll_1h = md.get("boll_1h") or {}
     macd_4h = md.get("macd_4h") or {}
     ema50_1d = md.get("ema50_1d"); ema20_4h = md.get("ema20_4h"); ema50_4h = md.get("ema50_4h")
     price = md.get("current_price"); rsi_div = md.get("rsi_div_1h")
     rsi_30m = md.get("rsi"); ma10_30m = md.get("ma10"); adx_30m = md.get("adx")
+    
 
     day_signal = "N/A"
     if ema50_1d:
