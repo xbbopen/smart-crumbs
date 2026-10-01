@@ -267,34 +267,63 @@ def manage_position(pos, cp, ma10, atr):
 # 单标的回测
 # ============================================================
 def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms, tier="satellite"):
-    print(f"\n▶️  [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}")
+    """
+    单标的回测（增强日志版）：
+    - 显式打印每个周期的数据准备情况（DB 已有 / 增量 / 全量）
+    - 回放过程按 10% 进度打印一次
+    - 每笔开仓/平仓都打印详情
+    """
+    print(f"\n{'─'*70}")
+    print(f"▶️  [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}")
 
     slippage_rate = SLIPPAGE_BY_TIER.get(tier, 0.0005)
 
-    # 30m 直接拉（必须，因为 1h/4h/1d 都要从它聚合或取长历史）
+    # ---------- 数据准备 ----------
+    print(f"  ▶️  【数据准备】")
+
+    # 30m 直接拉
     klines_30m, info_30m = fetch_and_cache_klines(symbol, asset_type, "30m", BT_BARS_30M)
     if not klines_30m:
-        print(f"⚠️  {symbol} 30m 数据获取失败")
+        print(f"    ❌ 30m 数据获取失败，跳过")
         return None
+    print(f"    30m: 请求 {BT_BARS_30M} 根 → 实际 {len(klines_30m)} 根 | 源: {info_30m.get('actual', '?')}")
+
+    # 4h 直接拉
     klines_4h, info_4h = fetch_and_cache_klines(symbol, asset_type, "4h", BT_BARS_4H)
+    print(f"    4h:  请求 {BT_BARS_4H} 根 → 实际 {len(klines_4h) if klines_4h else 0} 根 | 源: {info_4h.get('actual', '?') if klines_4h else 'N/A'}")
 
     # 1h 从 30m 聚合
     klines_1h = aggregate_klines(klines_30m, 2)
+    print(f"    1h:  从 30m 聚合 → {len(klines_1h)} 根")
+
+    # 4h 兜底
     if not klines_4h:
         klines_4h = aggregate_klines(klines_30m, 8)
+        print(f"    4h:  DB 拉取失败，从 30m 聚合 → {len(klines_4h)} 根")
 
-    # 1D K线：优先直接从数据源拉取，不足 50 根时降级 4H 聚合
-    klines_1d_direct, _ = fetch_and_cache_klines(symbol, asset_type, "1d", BT_BARS_1D)
+    # 1d 直接拉
+    klines_1d_direct, info_1d = fetch_and_cache_klines(symbol, asset_type, "1d", BT_BARS_1D)
     klines_1d = klines_1d_direct if klines_1d_direct else []
     if len(klines_1d) < 50:
         klines_1d_agg = aggregate_klines(klines_4h, 6)
         if len(klines_1d_agg) > len(klines_1d):
             klines_1d = klines_1d_agg
+            print(f"    1d:  从 4h 聚合兜底 → {len(klines_1d)} 根")
+        else:
+            print(f"    1d:  请求 {BT_BARS_1D} 根 → 实际 {len(klines_1d)} 根 | 源: {info_1d.get('actual', '?') if info_1d else 'N/A'}")
+    else:
+        print(f"    1d:  请求 {BT_BARS_1D} 根 → 实际 {len(klines_1d)} 根 | 源: {info_1d.get('actual', '?') if info_1d else 'N/A'}")
 
+    # 最低数据量检查
     if len(klines_30m) < 250:
-        print(f"⚠️  {symbol} 30m 数据不足（{len(klines_30m)}根），至少需要250根")
+        print(f"    ❌ 30m 数据不足（{len(klines_30m)} 根 < 250），跳过")
         return None
 
+    data_mode = "futures" if info_30m["primary"] == "hyperliquid" else "spot"
+    data_source = "Hyperliquid 合约" if data_mode == "futures" else "现货"
+    print(f"    数据源: {data_source} | 滑点: {slippage_rate*100:.3f}% | 费率: {FUNDING_PER_8H*100:.3f}%/8h")
+
+    # ---------- 时间戳索引 ----------
     ts_1h = [k["timestamp"] for k in klines_1h]
     ts_4h = [k["timestamp"] for k in klines_4h]
     ts_1d = [k["timestamp"] for k in klines_1d]
@@ -312,23 +341,28 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         end_idx = min(end_idx, idx)
 
     if start_idx >= end_idx:
-        print(f"⚠️  {symbol} 回放范围无效")
+        print(f"    ❌ 回放范围无效，跳过")
         return None
 
     backtest_start_ms = ts_30m[start_idx]
     backtest_end_ms = ts_30m[end_idx]
-    print(f"   30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根 | 回放 {fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}")
-    print(f"   滑点：{slippage_rate*100:.3f}% / 费率：{FUNDING_PER_8H*100:.3f}%/8h（仅做空）")
+    total_bars = end_idx - start_idx + 1
+
+    # ---------- 回放开始 ----------
+    print(f"  ▶️  【回放开始】")
+    print(f"    区间: {fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}（{total_bars} 根 30m）")
 
     strategy = load_strategy(strategy_name)
-    data_mode = "futures" if info_30m["primary"] == "hyperliquid" else "spot"
-    data_source = "Hyperliquid 合约" if data_mode == "futures" else "现货"
 
     trades = []
     position = None
     pos_info = None
     current_cap_theoretical = capital
     current_cap_real = capital
+
+    # 进度打印间隔（每 10% 打印一次）
+    progress_step = max(1, total_bars // 10)
+    next_progress = progress_step
 
     for i in range(start_idx, end_idx + 1):
         current_ts = ts_30m[i]
@@ -385,6 +419,14 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 margin_10x = position_value / LEVERAGE
                 coin_amount = position_value / entry if entry else 0
 
+                # 🚀 平仓日志
+                dir_cn = "多" if direction.startswith("long") else "空"
+                pnl_emoji = "✅" if pnl_pct > 0 else "❌"
+                print(f"      {pnl_emoji} 平仓#{len(trades)+1} [{dir_cn}] "
+                      f"{fmt_ts_short(ts_30m[pos_info['entry_idx']])}→{fmt_ts_short(ts_30m[i])} | "
+                      f"${entry:.4f}→${exit_price:.4f} | "
+                      f"{pnl_pct*100:+.2f}% | {reason}")
+
                 trades.append({
                     "entry_idx": pos_info["entry_idx"], "exit_idx": i,
                     "direction": direction,
@@ -412,7 +454,9 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         if position is None:
             try:
                 res = strategy.evaluate(symbol, asset_type, md)
-            except Exception:
+            except Exception as e:
+                # 策略评估出错时打印，方便定位
+                print(f"      ⚠️ 策略评估异常 @ bar {i}: {type(e).__name__}: {e}")
                 continue
 
             if res.get("triggered") and res.get("direction") != "spot_warning":
@@ -429,6 +473,19 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                         "tp_stage": 0,
                         "entry_idx": i,
                     }
+                    # 🚀 开仓日志
+                    dir_cn = "多" if position.startswith("long") else "空"
+                    reason_short = res.get("reason", "")[:30]
+                    print(f"      🔫 开仓#{len(trades)+1} [{dir_cn}] "
+                          f"{fmt_ts_short(ts_30m[i])} | "
+                          f"入场${entry_price:.4f} 止损${stop_price:.4f} | {reason_short}")
+
+        # 🚀 进度打印
+        if (i - start_idx + 1) >= next_progress:
+            pct = int((i - start_idx + 1) / total_bars * 100)
+            hold_status = "是" if position is not None else "否"
+            print(f"      进度 {pct}% ({i - start_idx + 1}根) | 已开仓 {len(trades)} 笔 | 持仓中: {hold_status}")
+            next_progress += progress_step
 
     # ---------- 末尾强制平仓 ----------
     if position is not None and pos_info:
@@ -453,6 +510,11 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         margin_10x = position_value / LEVERAGE
         coin_amount = position_value / entry if entry else 0
 
+        dir_cn = "多" if direction.startswith("long") else "空"
+        print(f"      🏁 末尾平仓 [{dir_cn}] "
+              f"{fmt_ts_short(ts_30m[pos_info['entry_idx']])}→{fmt_ts_short(ts_30m[end_idx])} | "
+              f"${entry:.4f}→${cp:.4f} | {pnl_pct*100:+.2f}%")
+
         trades.append({
             "entry_idx": pos_info["entry_idx"], "exit_idx": end_idx,
             "direction": direction,
@@ -475,11 +537,12 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         })
 
     # ---------- 统计 ----------
+    print(f"  ▶️  【结算】")
     total = len(trades)
     buy_hold = (klines_30m[end_idx]["close"] - klines_30m[start_idx]["close"]) / klines_30m[start_idx]["close"] * 100
 
     if total == 0:
-        print(f"   ⚠️  未触发任何交易")
+        print(f"    ⚠️  未触发任何交易")
         return {
             "strategy": strategy_name, "symbol": symbol, "asset_type": asset_type,
             "tier": tier,
@@ -576,7 +639,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     report["rating"] = rating
     report["rating_desc"] = rating_desc
 
-    print(f"   ✅ {total}笔 | 胜率{win_rate:.1f}% | "
+    print(f"    ✅ {total}笔 | 胜率{win_rate:.1f}% | "
           f"理论{total_return:.2f}% → 实盘{total_return_real:.2f}% | "
           f"基准{buy_hold:.2f}% | {rating}")
     return report
