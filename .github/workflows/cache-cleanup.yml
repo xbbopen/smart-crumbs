@@ -40,6 +40,7 @@ jobs:
           echo "计划删除 $delete_count 个旧缓存，保留最新 1 个"
 
           deleted=0
+          failed=0
           freed=0
           while IFS=$'\t' read -r cache_id key size; do
             [ -z "$cache_id" ] && continue
@@ -49,9 +50,14 @@ jobs:
               deleted=$((deleted + 1))
               freed=$((freed + size))
             else
-              echo "警告: 删除缓存 $cache_id 失败"
+              echo "警告: 删除缓存 $cache_id 失败（可能被限流，下次会重试）"
+              failed=$((failed + 1))
             fi
+            sleep 0.2
           done <<< "$to_delete"
 
           echo ""
-          echo "完成: 删除 $deleted 个旧缓存，释放 $(( freed / 1048576 ))MB。"
+          echo "完成: 成功删除 $deleted 个，失败 $failed 个，释放 $(( freed / 1048576 ))MB。"
+          if [ $failed -gt 0 ]; then
+            echo "提示: 失败的缓存会在下次定时运行时自动重试。"
+          fi
