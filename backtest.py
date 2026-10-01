@@ -818,47 +818,48 @@ def _render_consistency_notice(fee, capital):
 
 
 def _render_single_detail(r, fee=0.0005, capital=10000):
+    """
+    单标的汇总卡（精简版，不含交易明细列表）。
+    交易明细已移到 CSV 附件中。
+    """
     tier = r.get("tier", "satellite")
     tier_cn = TIER_CN.get(tier, tier)
     tier_icon = TIER_ICON.get(tier, "•")
     tier_color = TIER_COLOR.get(tier, "#333")
 
-    html = "<div style='background:#fff;padding:20px;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:20px;'>"
+    html = "<div style='background:#fff;padding:18px;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:15px;'>"
 
-    html += "<div style='display:flex; justify-content:space-between; align-items:center; border-bottom:2px dashed #eee; padding-bottom:12px; margin-bottom:15px;'>"
+    # 标题行
+    html += "<div style='display:flex; justify-content:space-between; align-items:center; border-bottom:2px dashed #eee; padding-bottom:10px; margin-bottom:12px;'>"
     html += f"<div>"
-    html += f"<span style='background:{tier_color};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;margin-right:10px;'>{tier_icon} {tier_cn}</span>"
-    html += f"<span style='font-size:22px; font-weight:900; color:#2c3e50;'>{r['symbol'].replace('_USDT','')}</span>"
-    html += f"<span style='margin-left:12px; font-size:15px; color:#e67e22; font-weight:bold;'>{r['rating']}</span>"
+    html += f"<span style='background:{tier_color};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;margin-right:8px;'>{tier_icon} {tier_cn}</span>"
+    html += f"<span style='font-size:18px; font-weight:900; color:#2c3e50;'>{r['symbol'].replace('_USDT','')}</span>"
+    html += f"<span style='margin-left:10px; font-size:14px; color:#e67e22; font-weight:bold;'>{r['rating']}</span>"
     html += f"</div>"
-    html += f"<div style='font-size:13px; color:#888;'>{r['data_source']}</div>"
+    html += f"<div style='font-size:12px; color:#888;'>{r['data_source']}</div>"
     html += "</div>"
 
     bs = r.get("backtest_start_ms")
     be = r.get("backtest_end_ms")
     if bs and be:
-        html += (f"<p style='color:#555;font-size:13px;margin:0 0 12px 0;'>"
-                 f"<b>📅 回测区间：</b>{fmt_ts(bs)} ~ {fmt_ts(be)}"
-                 f"（共 {r['bars_total']} 根 30m）</p>")
-
-    html += f"<p style='color:#666;font-size:13px;margin:0 0 15px 0;'>{r['rating_desc']}</p>"
+        html += (f"<p style='color:#888;font-size:12px;margin:0 0 10px 0;'>"
+                 f"📅 {fmt_ts(bs)} ~ {fmt_ts(be)}（{r['bars_total']} 根 30m）</p>")
 
     if r["total_trades"] == 0:
-        html += f"<p style='color:#999;padding:15px;background:#f8f9fa;border-radius:6px;'>⚠️ 本区间未触发任何交易信号。基准收益：<b>{r['benchmark_return']}%</b></p>"
+        html += f"<p style='color:#999;padding:12px;background:#f8f9fa;border-radius:6px;font-size:13px;'>⚠️ 未触发交易。基准收益：<b>{r['benchmark_return']}%</b></p>"
     else:
         ret_color = "#27ae60" if r["total_return"] > 0 else "#c0392b"
-        exc_color = "#27ae60" if r["excess_return"] > 0 else "#c0392b"
         rret_color = "#27ae60" if r["total_return_real"] > 0 else "#c0392b"
-        rexc_color = "#27ae60" if r["excess_return_real"] > 0 else "#c0392b"
+        exc_color = "#27ae60" if r["excess_return_real"] > 0 else "#c0392b"
 
-        html += "<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(115px, 1fr)); gap:10px; margin-bottom:15px;'>"
+        html += "<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(100px, 1fr)); gap:8px; margin-bottom:10px;'>"
 
         def metric_box(label, value, color="#2c3e50", is_important=False):
             border = "2px solid #e74c3c" if is_important else "1px solid #eee"
             return (
-                f"<div style='background:#fafbfc; padding:10px; border-radius:8px; text-align:center; border:{border};'>"
-                f"<div style='color:#888; font-size:11px; margin-bottom:3px;'>{label}</div>"
-                f"<div style='color:{color}; font-size:17px; font-weight:bold;'>{value}</div>"
+                f"<div style='background:#fafbfc; padding:8px; border-radius:6px; text-align:center; border:{border};'>"
+                f"<div style='color:#888; font-size:10.5px; margin-bottom:2px;'>{label}</div>"
+                f"<div style='color:{color}; font-size:15px; font-weight:bold;'>{value}</div>"
                 "</div>"
             )
 
@@ -866,23 +867,17 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
         html += metric_box("胜率", f"{r['win_rate']}%")
         html += metric_box("理论收益", f"{r['total_return']}%", ret_color)
         html += metric_box("实盘预估", f"{r['total_return_real']}%", rret_color, is_important=True)
-        html += metric_box("基准收益", f"{r['benchmark_return']}%", "#666")
-        html += metric_box("理论超额", f"{r['excess_return']}%", exc_color)
-        html += metric_box("实盘超额", f"{r['excess_return_real']}%", rexc_color)
-        html += metric_box("最大回撤", f"{r['max_dd']}%", "#e67e22")
+        html += metric_box("实盘超额", f"{r['excess_return_real']}%", exc_color)
+        html += metric_box("回撤", f"{r['max_dd']}%", "#e67e22")
         html += metric_box("盈亏比", r["profit_factor"])
         html += metric_box("夏普", r["sharpe"])
         html += "</div>"
 
-        html += "<div style='background:#f8f9fa; padding:12px; border-radius:8px; font-size:13px; margin-bottom:15px;'>"
-        html += f"<span style='color:#27ae60;'>🟢 做多：<b>{r['long_trades']}</b> 笔（{r['long_win_rate']}%）</span>"
-        html += " &nbsp;|&nbsp; "
-        html += f"<span style='color:#c0392b;'>🔴 做空：<b>{r['short_trades']}</b> 笔（{r['short_win_rate']}%）</span>"
-        html += f" &nbsp;|&nbsp; <span style='color:#666;'>平均持仓 <b>{r['avg_bars_held']}</b> 根30m</span>"
+        html += "<div style='background:#f8f9fa; padding:8px 12px; border-radius:6px; font-size:12px;'>"
+        html += f"🟢 做多 <b>{r['long_trades']}</b> 笔（{r['long_win_rate']}%） &nbsp;|&nbsp; "
+        html += f"🔴 做空 <b>{r['short_trades']}</b> 笔（{r['short_win_rate']}%） &nbsp;|&nbsp; "
+        html += f"⏱ 平均持仓 <b>{r['avg_bars_held']}</b> 根"
         html += "</div>"
-
-        html += "<h4 style='margin:20px 0 12px 0; color:#2c3e50; font-size:15px;'>📝 交易明细（共 {} 笔）</h4>".format(r["total_trades"])
-        html += _render_trades_cards(r["trades"])
 
     html += "</div>"
     return html
@@ -924,7 +919,55 @@ def _render_tier_table(reports, tier):
     html += "</table>"
     html += "<p style='color:#888;font-size:11px;margin-top:6px;'>💡 按实盘预估收益降序排列。「实盘预估」已扣除滑点和资金费率。</p>"
     return html
+    
+def _generate_trades_csv(all_reports):
+    """
+    生成合并的交易明细 CSV（所有标的合并到一个文件）。
+    加 UTF-8 BOM，确保 Excel 打开不乱码。
+    """
+    import csv
+    import io
 
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "标的", "分层", "方向", "入场时间", "入场价", "出场时间", "出场价",
+        "盈亏%", "理论盈亏U", "实盘盈亏U", "滑点U", "资金费率U", "手续费U",
+        "持仓根数", "离场原因", "硬止损价", "风险%"
+    ])
+
+    # 按分层 + 实盘收益排序，方便 Excel 里阅读
+    tier_order = {"core": 0, "satellite": 1, "watch": 2}
+    sorted_reports = sorted(all_reports,
+                            key=lambda x: (tier_order.get(x.get("tier", "satellite"), 1),
+                                           -x.get("total_return_real", 0)))
+
+    for r in sorted_reports:
+        sym = r["symbol"].replace("_USDT", "")
+        tier = r.get("tier", "satellite")
+        for t in r.get("trades", []):
+            writer.writerow([
+                sym,
+                tier,
+                "多" if t["direction"].startswith("long") else "空",
+                fmt_ts(t.get("entry_time_ms")),
+                round(t["entry_price"], 6),
+                fmt_ts(t.get("exit_time_ms")),
+                round(t["exit_price"], 6),
+                round(t["pnl_pct"] * 100, 2),
+                round(t.get("pnl_usd", 0), 2),
+                round(t.get("pnl_usd_real", 0), 2),
+                round(t.get("slippage_usd", 0), 2),
+                round(t.get("funding_usd", 0), 2),
+                round(t.get("fee_usd", 0), 2),
+                t.get("bars_held", 0),
+                t.get("exit_reason", ""),
+                round(t.get("stop_price", 0), 6),
+                round(t.get("risk_pct", 0), 2),
+            ])
+
+    # UTF-8 BOM 让 Excel 正确识别编码
+    return "\ufeff" + buf.getvalue()
 
 def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005, capital=10000):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
@@ -986,11 +1029,11 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
         if by_tier[tier]:
             html += _render_tier_table(by_tier[tier], tier)
 
-    # ---------- 分层详细卡片 ----------
+    # ---------- 分层详细汇总卡（不含交易明细，明细在附件 CSV 里） ----------
     for tier in TIER_ORDER:
         reports_in_tier = sorted(
-            [r for r in by_tier[tier] if r["total_trades"] > 0],
-            key=lambda x: x["total_return_real"], reverse=True
+            [r for r in by_tier[tier]],
+            key=lambda x: x.get("total_return_real", 0), reverse=True
         )
         if not reports_in_tier:
             continue
@@ -999,11 +1042,25 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
         tier_color = TIER_COLOR.get(tier, "#333")
 
         html += f"<h3 style='margin-top:40px; color:{tier_color}; border-left:5px solid {tier_color}; padding-left:10px;'>"
-        html += f"🔍 {tier_icon} {tier_cn} · 详细交易明细</h3>"
-        # 观察池只展示 top 5，避免报告过长
-        detail_n = 5 if tier == "watch" else len(reports_in_tier)
-        for r in reports_in_tier[:detail_n]:
+        html += f"🔍 {tier_icon} {tier_cn} · 各标的汇总（{len(reports_in_tier)} 个）</h3>"
+        # 所有标的都展示，只显示汇总卡，不显示明细列表
+        for r in reports_in_tier:
             html += _render_single_detail(r, fee=fee, capital=capital)
+
+    # ---------- 附件提示 ----------
+    html += """
+    <div style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); padding:20px; border-radius:10px; margin-top:30px; border-left:5px solid #f39c12;">
+        <h3 style="margin:0 0 10px 0; color:#b8860b; font-size:17px;">📎 完整交易明细</h3>
+        <p style="margin:0; font-size:14px; color:#555; line-height:1.7;">
+            为避免邮件过长，<b>每笔交易的详细数据已导出为 CSV 附件</b>。<br>
+            文件名格式：<code>backtest_trades_YYYYMMDD_HHMM.csv</code><br>
+            用 Excel 打开即可筛选、排序、透视分析。
+        </p>
+        <p style="margin:10px 0 0 0; font-size:13px; color:#888;">
+            CSV 字段：标的、分层、方向、入场/出场时间、入场/出场价、盈亏%、理论盈亏、实盘盈亏、滑点、资金费率、手续费、持仓根数、离场原因、硬止损、风险%
+        </p>
+    </div>
+    """
 
     html += "<hr style='margin-top:40px;'><p style='color:#aaa;font-size:11px;text-align:center;'>参谋长分层回测报告 · 仅供交流参考，不构成投资建议</p>"
     html += "</body></html>"
