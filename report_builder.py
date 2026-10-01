@@ -290,7 +290,93 @@ def render_global_state_panel(active_sr, md):
 
     html += "</div>"
     return html
+    
+def render_pressure_radar(md):
+    """
+    30m + 4H 双周期压力位雷达。
+    - 30m：短期压力，影响轨道2 A1 条件
+    - 4H：中期压力，判断是否冲顶
+    """
+    import time as _time
+    cp = md.get("current_price")
+    if not cp or cp <= 0:
+        return ""
 
+    def fmt_ago(ts_ms):
+        if not ts_ms:
+            return "时间未知"
+        try:
+            diff_h = (_time.time() - ts_ms / 1000) / 3600
+            if diff_h < 1:
+                return "刚刚"
+            if diff_h < 24:
+                return f"{int(diff_h)} 小时前"
+            return f"{int(diff_h / 24)} 天前"
+        except Exception:
+            return "时间未知"
+
+    def impact_level(dist_pct, period):
+        if period == "30m":
+            if dist_pct < 3: return "🔴 极强"
+            if dist_pct < 5: return "🟠 强"
+            if dist_pct < 8: return "🟡 中"
+            return None
+        else:  # 4H
+            if dist_pct < 3: return "🟠 强"
+            if dist_pct < 5: return "🟡 中"
+            if dist_pct < 8: return "🟢 弱"
+            return None
+
+    rows = []
+
+    # 30m 前高（近 4 天）
+    rh = md.get("recent_high")
+    rh_ts = md.get("recent_high_ts")
+    if rh and rh > cp:
+        dist = (rh - cp) / cp * 100
+        level = impact_level(dist, "30m")
+        if level:
+            rows.append({
+                "period": "30m", "span": "近 4 天",
+                "price": rh, "ago": fmt_ago(rh_ts),
+                "dist": dist, "level": level,
+            })
+
+    # 4H 前高（近 33 天）
+    rh4 = md.get("recent_high_4h")
+    rh4_ts = md.get("recent_high_4h_ts")
+    if rh4 and rh4 > cp:
+        dist = (rh4 - cp) / cp * 100
+        level = impact_level(dist, "4h")
+        if level:
+            rows.append({
+                "period": "4H", "span": "近 33 天",
+                "price": rh4, "ago": fmt_ago(rh4_ts),
+                "dist": dist, "level": level,
+            })
+
+    if not rows:
+        return ""
+
+    html = (
+        "<div style='margin: 12px 15px; padding: 12px 15px; background: #fff; "
+        "border-left: 4px solid #e67e22; border-radius: 0 8px 8px 0; "
+        "box-shadow: 0 1px 4px rgba(0,0,0,0.04);'>"
+        "<p style='margin: 0 0 8px 0; font-weight: bold; color: #e67e22; font-size: 14px;'>"
+        "📡 压力位雷达（当前价 $" + f"{cp:.4f}" + "）</p>"
+    )
+    for r in rows:
+        html += (
+            "<p style='margin: 5px 0; font-size: 13px; color: #333; line-height: 1.6;'>"
+            f"<b>{r['level']}</b> &nbsp;"
+            f"<b>{r['period']}</b> 前高："
+            f"<b style='color:#c0392b;'>${r['price']:.4f}</b> "
+            f"<span style='color:#888; font-size:12px;'>（{r['span']}，{r['ago']}形成）</span>"
+            f" &nbsp;—— 距当前 <b style='color:#e67e22;'>+{r['dist']:.2f}%</b>"
+            "</p>"
+        )
+    html += "</div>"
+    return html
 
 # ============================================================
 # 🚀 轨道状态面板（4 轨道一览）
@@ -580,6 +666,8 @@ def build_symbol_block(r):
 
     # 市场状态面板
     html += render_global_state_panel(active_sr, md)
+    # 🚀 压力位雷达
+    html += render_pressure_radar(md)
 
     # 多周期面板
     html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md, active_sr)}</div>"
