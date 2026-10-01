@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-v1_default 策略 - 整改版
+v1_default 策略 - 整改版 v2
 =========================
-1. 4H 趋势判断统一为 momentum_4h
-2. 轨道3 完全独立，触发条件 4/4 全满足
-3. 止损统一基于加权入场价 + 1.5%~3.5% 双保险
-4. 新增波动率熔断（ATR/价格 > 3%）
-5. 新增 KDJ 极端值过滤（J>100 否决做多）
-6. 轨道4 加"站上30m MA10"硬条件
-7. 生成 global_judgment 供报告层统一使用
+P0 修复：
+1. 轨道3 极端波动熔断（波动率飙升时禁止抄底，避免在插针中开仓）
+2. 止损双保险改为分层目标风险（BTC/ETH 2%，中市值 2.5%，altcoin 3%）
+
+P1 修复：
+3. CVD 改用 OBV（基于价格变化累加成交量，比阴阳线估算更稳健）
+4. 动量停滞阈值改为 ATR 归一化（跨币种一致）
+
+v1 原有：
+- 4H 趋势判断统一为 momentum_4h
+- 轨道3 完全独立，触发条件 4/4 全满足
+- 新增 KDJ 极端值过滤（J>100 否决做多）
+- 轨道4 加"站上30m MA10"硬条件
+- 生成 global_judgment 供报告层统一使用
 """
 from strategies.base import BaseStrategy
 
@@ -16,8 +23,26 @@ from strategies.base import BaseStrategy
 MAJOR_COINS = {"BTC", "ETH"}
 MID_COINS = {"SOL", "BNB", "XRP", "ADA", "AVAX", "LINK", "DOGE"}
 
+# 🚀 P0: 按分层设定目标止损空间
+TARGET_RISK_BY_TIER = {
+    "major": 0.020,   # BTC/ETH: 2.0%
+    "mid": 0.025,     # 中市值: 2.5%
+    "alt": 0.030,     # altcoin: 3.0%
+}
+
+
+def get_tier(symbol):
+    """按币种分层返回 tier 名称。"""
+    sym = (symbol or "").replace("_USDT", "").replace("_usdt", "").upper()
+    if sym in MAJOR_COINS:
+        return "major"
+    elif sym in MID_COINS:
+        return "mid"
+    return "alt"
+
 
 def get_atr_multiplier(symbol):
+    """保留旧的 ATR 倍数函数，供兼容使用。"""
     sym = (symbol or "").replace("_USDT", "").replace("_usdt", "").upper()
     if sym in MAJOR_COINS:
         return 1.5
@@ -49,14 +74,22 @@ class V1DefaultStrategy(BaseStrategy):
         elif score <= -1: return "bear"
         return "neutral"
 
-    # ============ 动量停滞 ============
+    # ============ 🚀 P1: 动量停滞改为 ATR 归一化 ============
     def _detect_momentum_stall(self, md):
-        macd_4h = md.get("macd_4h") or {}; adx = md.get("adx")
-        hist = macd_4h.get("hist"); price = md.get("current_price")
-        if hist is None or adx is None or not price or price <= 0:
+        """动量停滞：MACD 柱相对 ATR 极小 + ADX 低位。"""
+        macd_4h = md.get("macd_4h") or {}
+        adx = md.get("adx")
+        atr = md.get("atr")
+        hist = macd_4h.get("hist")
+        price = md.get("current_price")
+
+        if hist is None or adx is None or atr is None or not price or price <= 0:
             return False
         try:
-            return abs(float(hist)) / float(price) < 0.0005 and adx < 20
+            if float(atr) <= 0:
+                return False
+            # 🚀 P1: 用 ATR 归一化，跨币种一致
+            return abs(float(hist)) / float(atr) < 0.3 and adx < 20
         except (TypeError, ValueError):
             return False
 
@@ -69,6 +102,24 @@ class V1DefaultStrategy(BaseStrategy):
             return (float(atr) / float(price)) > 0.03
         except (TypeError, ValueError):
             return False
+
+    # ============ 🚀 P1: OBV 计算（替代 CVD） ============
+    def _calc_obv_series(self, klines):
+        """
+        OBV 累积量：价涨加量，价跌减量，价平不加不减。
+        比基于阴阳线估算的 CVD 更稳健，避免震荡市的噪声误报。
+        """
+        if not klines:
+            return []
+        obv_series = [0]
+        obv = 0
+        for i in range(1, len(klines)):
+            if klines[i]["close"] > klines[i - 1]["close"]:
+                obv += klines[i]["volume"]
+            elif klines[i]["close"] < klines[i - 1]["close"]:
+                obv -= klines[i]["volume"]
+            obv_series.append(obv)
+        return obv_series
 
     # ============ 市场状态机 ============
     def _determine_regime(self, md):
@@ -103,9 +154,10 @@ class V1DefaultStrategy(BaseStrategy):
         return ("ranging", ["track_2"], ["track_1", "track_4"],
                 "⚪ 无明确趋势，只允许做空")
 
-    # ============ 分档入场计划 ============
+    # ============ 🚀 P0: 分档入场计划（止损分层） ============
     def _build_entry_plan(self, symbol, direction, cp, atr, rh, rl, ma10, boll_mid, trigger_type):
-        atr_mult = get_atr_multiplier(symbol)
+        tier = get_tier(symbol)
+        base_risk = TARGET_RISK_BY_TIER[tier]
         stages = []; note = ""
 
         if trigger_type == "long_trend":
@@ -161,25 +213,33 @@ class V1DefaultStrategy(BaseStrategy):
         total_weight = sum(s["weight"] for s in stages)
         avg_price = sum(s["price"] * s["weight"] for s in stages) / total_weight if total_weight > 0 else cp
 
+        # 🚀 P0: 止损分层 + ATR 微调
         is_long = direction.startswith("long")
-        if atr and atr > 0:
-            stop = (avg_price - atr_mult * atr) if is_long else (avg_price + atr_mult * atr)
+        if atr and avg_price > 0:
+            atr_pct = atr / avg_price
+            # 目标止损 = max(分层基础值, 1.2 倍 ATR%)
+            risk_pct = max(base_risk, atr_pct * 1.2)
+            # 上限：分层基础值的 1.5 倍（避免 ATR 过大时止损过宽）
+            risk_pct = min(risk_pct, base_risk * 1.5)
         else:
-            stop = avg_price * 0.97 if is_long else avg_price * 1.03
+            risk_pct = base_risk
 
-        if avg_price > 0:
-            risk_pct = abs(avg_price - stop) / avg_price
-            if risk_pct < 0.015:
-                stop = avg_price * 0.985 if is_long else avg_price * 1.015
-                note += "（原始止损空间不足1.5%，已强制修正）"
-            elif risk_pct > 0.035:
-                stop = avg_price * 0.965 if is_long else avg_price * 1.035
-                note += "（原始止损空间过大，已压缩到3.5%）"
+        stop = avg_price * (1 - risk_pct) if is_long else avg_price * (1 + risk_pct)
+        note += f"（目标止损 {risk_pct*100:.2f}%）"
 
         return {"stages": stages, "avg_price": avg_price, "stop": stop, "note": note}
 
-    # ============ 轨道3 独立评估 ============
+    # ============ 🚀 P0: 轨道3 独立评估（加波动率熔断） ============
     def _evaluate_track3_standalone(self, md):
+        # 🚀 P0: 极端波动熔断，禁止抄底
+        if self._detect_volatility_spike(md):
+            return {
+                "score": 0, "max": 4,
+                "details": {"⛔ 极端波动熔断": "波动率飙升（ATR/价格 > 3%），禁止抄底"},
+                "hard_ok": False, "allowed": False,
+                "independent": True, "triggered": False,
+            }
+
         price = md.get("current_price"); rh = md.get("recent_high")
         rsi = md.get("rsi"); kdj_1h = md.get("kdj_1h") or {}
         klines = md.get("klines_30m") or []
@@ -276,12 +336,8 @@ class V1DefaultStrategy(BaseStrategy):
         adx_ok_2 = adx is not None and adx >= 20
         adx_ok_4 = adx is not None and adx >= 18
 
-        cvd_series = []
-        if klines:
-            cvd = 0
-            for k in klines:
-                cvd += k["volume"] * (1 if k["close"] >= k["open"] else -1)
-                cvd_series.append(cvd)
+        # 🚀 P1: 用 OBV 替代 CVD
+        obv_series = self._calc_obv_series(klines)
 
         # ============ 轨道1 ============
         if regime in ("volatile", "momentum_stall"):
@@ -358,16 +414,20 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_2"]["details"]["A2.30m RSI超买"] = f"✅ RSI={rsi_str}"
             else:
                 result["track_2"]["details"]["A2.30m RSI超买"] = f"❌ RSI={rsi_str}"
-            if cvd_series and len(cvd_series) >= 10:
+
+            # 🚀 P1: OBV 顶背离（价格新高，OBV 未新高）
+            if obv_series and len(obv_series) >= 10:
                 high_now = max(k["high"] for k in klines[-3:])
                 high_prev = max(k["high"] for k in klines[-10:-3])
-                if high_now > high_prev and cvd_series[-1] < max(cvd_series[-10:-3]) * 0.95:
+                # OBV 顶背离：价格新高，但 OBV 当前值未超过 4 根前的值
+                if high_now > high_prev and obv_series[-1] <= obv_series[-4]:
                     rev += 1
-                    result["track_2"]["details"]["A3.30m CVD顶背离"] = "✅ 出现"
+                    result["track_2"]["details"]["A3.30m OBV顶背离"] = "✅ 价新高OBV未新高"
                 else:
-                    result["track_2"]["details"]["A3.30m CVD顶背离"] = "❌ 未出现"
+                    result["track_2"]["details"]["A3.30m OBV顶背离"] = "❌ 未出现"
             else:
-                result["track_2"]["details"]["A3.30m CVD顶背离"] = "❌ 数据不足"
+                result["track_2"]["details"]["A3.30m OBV顶背离"] = "❌ 数据不足"
+
             a4_reasons = []
             if rsi_1h is not None and rsi_1h >= 70: a4_reasons.append(f"1h RSI={rsi_1h_str}")
             if rsi_div == "bearish": a4_reasons.append("1h顶背离")
@@ -448,7 +508,7 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_2"]["score"] = tf_core + tf_aux
                 result["track_2"]["reason"] = f"顺势做空 核心{tf_core}/2+辅助{tf_aux}/4"
 
-        # ============ 轨道3（独立） ============
+        # ============ 轨道3（独立，P0 熔断） ============
         result["track_3"] = self._evaluate_track3_standalone(market_data)
 
         # ============ 轨道4 ============
