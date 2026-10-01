@@ -595,11 +595,25 @@ def build_symbol_block(r):
     cp_str = f"${fmt_price(cp)}" if isinstance(cp, (int, float)) else "N/A"
     is_spot = md.get("data_mode") == "spot"
 
-    # 🚀 提前定义变量，供"未触发"分支使用（修复 NameError）
+    # 🚀 提前定义变量，供"未触发"分支使用
     rsi = md.get("rsi")
     rsi_1h = md.get("rsi_1h")
     adx = md.get("adx")
     ma10 = md.get("ma10")
+
+    # 🚀 数据基准时间（最新已收盘 30m K线的时间）
+    klines_30m = md.get("klines_30m") or []
+    base_time_str = ""
+    if klines_30m:
+        try:
+            last_ts = klines_30m[-1]["timestamp"] / 1000
+            base_time_str = datetime.fromtimestamp(last_ts, BJT).strftime("%H:%M")
+        except Exception:
+            pass
+    base_tag = (
+        f"<span style='color:#888;font-size:0.78em;font-weight:normal;margin-left:6px;'>"
+        f"（基准 {base_time_str} 30m收盘）</span>"
+    ) if base_time_str else ""
 
     for sname, sr_obj in r.get("strategy_results", {}).items():
         if sr_obj and sr_obj.get("error"):
@@ -655,12 +669,23 @@ def build_symbol_block(r):
 
     data_source = md.get('data_source') or '未知数据源'
     if is_spot:
-        header_info = f"<div><b>当前价格：</b><span style='color:{border_color};font-size:1.2em;font-weight:bold;'>{cp_str}</span></div><div><b>模式：</b>现货 ⚠️</div>"
+        header_info = (
+            f"<div><b>当前价格：</b>"
+            f"<span style='color:{border_color};font-size:1.2em;font-weight:bold;'>{cp_str}</span>"
+            f"{base_tag}</div>"
+            f"<div><b>模式：</b>现货 ⚠️</div>"
+        )
     else:
         fp = md.get('funding_percentile'); fr = md.get('funding_rate')
         fp_str = f"{fp:.1%}" if fp is not None else "N/A"
         fr_str = f"{fr:.4f}%" if fr is not None else "N/A"
-        header_info = f"<div><b>当前价格：</b><span style='color:{border_color};font-size:1.2em;font-weight:bold;'>{cp_str}</span></div><div><b>数据源：</b>{data_source}</div><div><b>费率：</b>{fr_str}（拥挤度{fp_str}）</div>"
+        header_info = (
+            f"<div><b>当前价格：</b>"
+            f"<span style='color:{border_color};font-size:1.2em;font-weight:bold;'>{cp_str}</span>"
+            f"{base_tag}</div>"
+            f"<div><b>数据源：</b>{data_source}</div>"
+            f"<div><b>费率：</b>{fr_str}（拥挤度{fp_str}）</div>"
+        )
 
     html = f"""
     <div style="border: 3px solid {border_color}; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 6px 20px rgba(0,0,0,0.15); overflow: hidden;">
