@@ -576,7 +576,7 @@ def build_symbol_block(r):
     html += render_global_state_panel(active_sr, md)
 
     # 多周期面板
-    html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md)}</div>"
+    html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md, active_sr)}</div>"
 
     # 轨道状态面板
     html += f"<div style='padding: 0 20px;'>{render_track_status_panel(active_sr)}</div>"
