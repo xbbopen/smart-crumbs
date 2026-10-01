@@ -25,9 +25,29 @@
     { "symbol": "PENGU_USDT", "type": "futures" },
     { "symbol": "FIL_USDT", "type": "futures" }
   ],
+
+  "backtest_tiers": {
+    "core": [
+      "BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT",
+      "DOGE_USDT", "XRP_USDT", "ADA_USDT", "AVAX_USDT"
+    ],
+    "satellite": [
+      "LINK_USDT", "LTC_USDT", "BCH_USDT", "ATOM_USDT",
+      "DOT_USDT", "ETC_USDT", "ARB_USDT", "OP_USDT",
+      "FIL_USDT", "UNI_USDT", "NEAR_USDT", "SUI_USDT",
+      "ZEC_USDT", "QNT_USDT", "WLD_USDT", "APT_USDT",
+      "INJ_USDT", "SEI_USDT"
+    ],
+    "watch": [
+      "HYPE_USDT", "ENA_USDT", "ONDO_USDT", "TAO_USDT",
+      "PENGU_USDT", "TIA_USDT", "ORDI_USDT", "WIF_USDT",
+      "TRUMP_USDT", "FARTCOIN_USDT"
+    ]
+  },
+
   "backtest_defaults": {
     "strategies": ["v1_default"],
-    "symbols": ["BTC", "ETH", "SOL"],
+    "symbols": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
     "interval": "30m",
     "limit": 1000,
     "initial_capital": 10000,
