@@ -363,7 +363,9 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     override = get_source_override(symbol, interval)
 
     # Hyperliquid 现已上线该合约 → 作废旧 override + max_available
-    if asset_type == "futures" and override and override != "hyperliquid":
+    # 用 get_primary_source 实际探测，而不是靠 asset_type 判断
+    current_primary = get_primary_source(symbol, asset_type)
+    if current_primary == "hyperliquid" and override and override != "hyperliquid":
         log.info(f"    [{symbol}][{interval}] ⚡ Hyperliquid 现已上线该合约，作废旧 override ({override})")
         clear_source_override(symbol, interval)
         clear_max_available(symbol, interval)
