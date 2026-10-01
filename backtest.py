@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-回测引擎 - 分层回测 + 现实模拟
+回测引擎 v7 - 分层回测 + 现实模拟
 
 v7 核心改动：
 1. 从 config.json 的 backtest_tiers 读分层标的，不再拉全市场
@@ -9,17 +9,6 @@ v7 核心改动：
 4. 报告分三层展示：核心池 / 卫星池 / 观察池
 5. 新增"实盘预估收益"列（扣滑点+费率）
 6. 无冷却期（按用户要求）
-
-v8 核心改动（策略整改适配）：
-7. 适配 v1_default.py 的 global_judgment 结构
-8. 轨道3 改为独立稀有事件（不受状态机约束），触发条件由策略内部负责
-9. 止损统一基于加权入场价 ± ATR 倍数（含 1.5%~3.5% 双保险），由策略内部负责
-10. 波动率熔断（ATR/价格 > 3% 时策略内部自动暂停所有轨道）
-11. KDJ 极端值过滤（J>100 否决做多），由策略内部负责
-12. 轨道4 加"站上30m MA10"硬条件，由策略内部负责
-
-说明：v8 的策略层改动全部在 v1_default.py 内部，回测代码本身不需要
-修改核心逻辑，只保留原有的分层回测 + 现实模拟框架。
 """
 import json, time, argparse, os, math, sys
 import bisect
@@ -33,32 +22,24 @@ from data_fetcher import (
     get_primary_source, to_hyperliquid_coin, get_hyperliquid_universe,
 )
 from email_sender import send_html_email
-# 🚀 强制行缓冲，让 print 立即输出到 GitHub Actions 日志
-try:
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
-except Exception:
-    pass
 
 BJT = timezone(timedelta(hours=8))
-LEVERAGE = 10       # 回测统一按 10 倍杠杆口径计算保证金
+LEVERAGE = 10
 
-# 各周期目标根数（回测用，比实盘多一些历史）
 BT_BARS_30M = 5000
 BT_BARS_4H = 3000
 BT_BARS_1D = 500
 
 # 滑点（按分层）
 SLIPPAGE_BY_TIER = {
-    "core": 0.0002,       # 核心池 0.02%
-    "satellite": 0.0005,  # 卫星池 0.05%
-    "watch": 0.0010,      # 观察池 0.10%
+    "core": 0.0002,
+    "satellite": 0.0005,
+    "watch": 0.0010,
 }
 
 # 资金费率：每 8 小时假设成本 0.01%（仅对做空扣）
 FUNDING_PER_8H = 0.0001
 
-# 分层中文化
 TIER_CN = {"core": "核心池", "satellite": "卫星池", "watch": "观察池"}
 TIER_ORDER = ["core", "satellite", "watch"]
 TIER_ICON = {"core": "🏆", "satellite": "🥇", "watch": "🔬"}
@@ -68,39 +49,6 @@ TIER_COLOR = {"core": "#27ae60", "satellite": "#3498db", "watch": "#9b59b6"}
 # ============================================================
 # 工具函数
 # ============================================================
-# ============================================================
-# 🚀 智能价格格式化（按量级自动调整小数位）
-# ============================================================
-def fmt_price(p):
-    """
-    按价格量级智能格式化，保留 4-6 位有效数字，不带千位分隔符。
-    - BTC 83935   → "83935.00"
-    - ETH 2700.5  → "2700.5000"
-    - DOGE 0.1534 → "0.15340"
-    - PEPE 0.0000089 → "0.00000890"
-    """
-    if p is None:
-        return "N/A"
-    try:
-        p = float(p)
-        if p == 0:
-            return "0"
-        ap = abs(p)
-        if ap >= 1000:
-            return f"{p:.2f}"
-        elif ap >= 1:
-            return f"{p:.4f}"
-        elif ap >= 0.01:
-            return f"{p:.5f}"
-        elif ap >= 0.0001:
-            return f"{p:.6f}"
-        elif ap >= 0.000001:
-            return f"{p:.8f}"
-        else:
-            return f"{p:.10f}"
-    except (TypeError, ValueError):
-        return str(p)
-
 def parse_date(d):
     if not d: return None
     try:
@@ -123,12 +71,8 @@ def fmt_ts_short(ts_ms):
     return fmt_ts(ts_ms, "%m-%d %H:%M")
 
 
-# ============================================================
-# 从预切好的多周期K线组装 market_data
-# ============================================================
 def build_market_data_from_slices(symbol, asset_type, window_30m, window_1h,
                                    window_4h, window_1d, data_mode, data_source):
-    """从预切好的多周期K线组装 market_data。"""
     md = {
         "symbol": symbol, "asset_type": asset_type, "fetch_status": "ok",
         "data_mode": data_mode, "data_source": data_source,
@@ -209,7 +153,6 @@ def calc_sharpe(returns, risk_free=0.0):
 
 
 def evaluate_strategy(report):
-    """S/A/B/C/D 评级"""
     excess = report["total_return"] - report["benchmark_return"]
     sharpe = report["sharpe"]
     dd = report["max_dd"]
@@ -245,51 +188,34 @@ def evaluate_strategy(report):
     return "❌ D级", f"综合得分{score}。跑输基准"
 
 
-# ============================================================
-# 持仓管理：硬止损 + 移动止盈阶梯 + MA10 动态离场
-# ============================================================
 def manage_position(pos, cp, ma10, atr):
-    """
-    持仓管理：返回 (still_hold, exit_price, exit_reason)
-    pos: {"direction": ..., "entry": ..., "stop": ..., "tp_stage": 0/1/2/3, "entry_idx": ...}
-    """
     direction = pos["direction"]
     entry = pos["entry"]
     stop = pos["stop"]
     tp_stage = pos["tp_stage"]
 
     if direction.startswith("long"):
-        # 止损
         if cp <= stop:
             return False, stop, "止损"
-        # 移动止盈阶梯
         profit_atr = (cp - entry) / atr if atr and atr > 0 else 0
         if tp_stage < 1 and profit_atr >= 1.0:
-            pos["stop"] = entry
-            pos["tp_stage"] = 1
+            pos["stop"] = entry; pos["tp_stage"] = 1
         elif tp_stage < 2 and profit_atr >= 2.0:
-            pos["stop"] = entry + 1.0 * atr
-            pos["tp_stage"] = 2
+            pos["stop"] = entry + 1.0 * atr; pos["tp_stage"] = 2
         elif tp_stage < 3 and profit_atr >= 3.0:
-            pos["stop"] = entry + 2.0 * atr
-            pos["tp_stage"] = 3
-        # MA10 离场
+            pos["stop"] = entry + 2.0 * atr; pos["tp_stage"] = 3
         if ma10 and cp < ma10:
             return False, cp, "MA10跌破"
     else:
-        # 做空
         if cp >= stop:
             return False, stop, "止损"
         profit_atr = (entry - cp) / atr if atr and atr > 0 else 0
         if tp_stage < 1 and profit_atr >= 1.0:
-            pos["stop"] = entry
-            pos["tp_stage"] = 1
+            pos["stop"] = entry; pos["tp_stage"] = 1
         elif tp_stage < 2 and profit_atr >= 2.0:
-            pos["stop"] = entry - 1.0 * atr
-            pos["tp_stage"] = 2
+            pos["stop"] = entry - 1.0 * atr; pos["tp_stage"] = 2
         elif tp_stage < 3 and profit_atr >= 3.0:
-            pos["stop"] = entry - 2.0 * atr
-            pos["tp_stage"] = 3
+            pos["stop"] = entry - 2.0 * atr; pos["tp_stage"] = 3
         if ma10 and cp > ma10:
             return False, cp, "MA10突破"
 
@@ -297,62 +223,34 @@ def manage_position(pos, cp, ma10, atr):
 
 
 # ============================================================
-# 单标的回测
+# 核心回测逻辑（含滑点+资金费率）
 # ============================================================
 def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms, tier="satellite"):
-    """
-    单标的回测（精简日志版）。
-    日志策略：
-    - 数据准备：每周期一行
-    - 回放过程：每 5% 打一次进度条
-    - 每笔开平仓：不打印（明细在 CSV 附件里）
-    - 结算：一行汇总
-    """
-    print(f"\n{'─'*70}")
-    print(f"▶️  [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}")
+    print(f"\n▶️  回测 [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}")
 
     slippage_rate = SLIPPAGE_BY_TIER.get(tier, 0.0005)
 
-    # ---------- 数据准备 ----------
-    print(f"  📦 【数据准备】")
-
     klines_30m, info_30m = fetch_and_cache_klines(symbol, asset_type, "30m", BT_BARS_30M)
     if not klines_30m:
-        print(f"     ❌ 30m 数据获取失败，跳过")
+        print(f"⚠️  {symbol} 30m 数据获取失败")
         return None
-    print(f"     30m: {len(klines_30m)} 根（源: {info_30m.get('actual', '?')}）")
-
     klines_4h, info_4h = fetch_and_cache_klines(symbol, asset_type, "4h", BT_BARS_4H)
-    print(f"     4h:  {len(klines_4h) if klines_4h else 0} 根（源: {info_4h.get('actual', '?') if klines_4h else 'N/A'}）")
 
     klines_1h = aggregate_klines(klines_30m, 2)
-    print(f"     1h:  {len(klines_1h)} 根（从 30m 聚合）")
-
     if not klines_4h:
         klines_4h = aggregate_klines(klines_30m, 8)
-        print(f"     4h:  从 30m 聚合 → {len(klines_4h)} 根")
 
-    klines_1d_direct, info_1d = fetch_and_cache_klines(symbol, asset_type, "1d", BT_BARS_1D)
+    klines_1d_direct, _ = fetch_and_cache_klines(symbol, asset_type, "1d", BT_BARS_1D)
     klines_1d = klines_1d_direct if klines_1d_direct else []
     if len(klines_1d) < 50:
         klines_1d_agg = aggregate_klines(klines_4h, 6)
         if len(klines_1d_agg) > len(klines_1d):
             klines_1d = klines_1d_agg
-            print(f"     1d:  从 4h 聚合兜底 → {len(klines_1d)} 根")
-        else:
-            print(f"     1d:  {len(klines_1d)} 根（源: {info_1d.get('actual', '?') if info_1d else 'N/A'}）")
-    else:
-        print(f"     1d:  {len(klines_1d)} 根（源: {info_1d.get('actual', '?') if info_1d else 'N/A'}）")
 
     if len(klines_30m) < 250:
-        print(f"     ❌ 30m 数据不足（{len(klines_30m)} 根 < 250），跳过")
+        print(f"⚠️  {symbol} 30m 数据不足（{len(klines_30m)}根），至少需要250根")
         return None
 
-    data_mode = "futures" if info_30m["primary"] == "hyperliquid" else "spot"
-    data_source = "Hyperliquid 合约" if data_mode == "futures" else "现货"
-    print(f"     滑点 {slippage_rate*100:.3f}% | 费率 {FUNDING_PER_8H*100:.3f}%/8h")
-
-    # ---------- 时间戳索引 ----------
     ts_1h = [k["timestamp"] for k in klines_1h]
     ts_4h = [k["timestamp"] for k in klines_4h]
     ts_1d = [k["timestamp"] for k in klines_1d]
@@ -369,26 +267,24 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         end_idx = min(end_idx, idx)
 
     if start_idx >= end_idx:
-        print(f"     ❌ 回放范围无效，跳过")
+        print(f"⚠️  {symbol} 回放范围无效")
         return None
 
     backtest_start_ms = ts_30m[start_idx]
     backtest_end_ms = ts_30m[end_idx]
-    total_bars = end_idx - start_idx + 1
-
-    print(f"  ▶️  【回放】{fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}（{total_bars} 根）")
+    print(f"   数据源：{info_30m['actual']} | 30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根")
+    print(f"   回放区间：{fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}")
+    print(f"   滑点：{slippage_rate*100:.3f}% / 费率：{FUNDING_PER_8H*100:.3f}%/8h（仅做空）")
 
     strategy = load_strategy(strategy_name)
+    data_mode = "futures" if info_30m["primary"] == "hyperliquid" else "spot"
+    data_source = "Hyperliquid 合约" if data_mode == "futures" else "现货"
 
     trades = []
     position = None
     pos_info = None
     current_cap_theoretical = capital
     current_cap_real = capital
-
-    # 进度条：每 20% 打印一次
-    progress_step = max(1, total_bars // 5)  # 5 段 = 每 20%
-    next_progress = 0  # 从 0% 开始
 
     for i in range(start_idx, end_idx + 1):
         current_ts = ts_30m[i]
@@ -409,7 +305,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         atr = md["atr"]
         ma10 = md["ma10"]
 
-        # ---------- 持仓管理 ----------
+        # ---------- 平仓处理 ----------
         if position is not None:
             still_hold, exit_price, reason = manage_position(pos_info, cp, ma10, atr)
             if not still_hold:
@@ -420,10 +316,14 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
                 position_value = min(current_cap_theoretical * 0.5, current_cap_theoretical * 0.02 / risk_pct) if risk_pct > 0 else current_cap_theoretical * 0.5
 
+                # 理论盈亏（扣手续费）
                 fee_cost = position_value * fee * 2
                 pnl_theoretical = position_value * pnl_pct - fee_cost
+
+                # 现实模拟：滑点
                 slippage_cost = position_value * slippage_rate * 2
 
+                # 现实模拟：资金费率（仅做空扣）
                 holding_bars = i - pos_info["entry_idx"]
                 holding_hours = holding_bars * 0.5
                 settlements = holding_hours / 8
@@ -485,25 +385,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                         "entry_idx": i,
                     }
 
-        # ---------- 进度条 ----------
-        bars_done = i - start_idx + 1
-        if bars_done >= next_progress:
-            pct = int(bars_done / total_bars * 100)
-            filled = pct // 5  # 每段 5%
-            bar = "█" * filled + "░" * (20 - filled)
-            if position is not None:
-                hold_str = "多" if position.startswith("long") else "空"
-            else:
-                hold_str = "无"
-            print(f"      {bar} {pct:3d}% | 开仓 {len(trades):>3d} | 持仓 {hold_str}")
-            next_progress += progress_step
-
-    # 确保 100% 一定打印（防止尾部循环不足一个步长）
-    if (end_idx - start_idx + 1) < next_progress:
-        bar = "█" * 20
-        hold_str = "无" if position is None else ("多" if position.startswith("long") else "空")
-        print(f"      {bar} 100% | 开仓 {len(trades):>3d} | 持仓 {hold_str}")
-
     # ---------- 末尾强制平仓 ----------
     if position is not None and pos_info:
         cp = klines_30m[end_idx]["close"]
@@ -553,7 +434,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     buy_hold = (klines_30m[end_idx]["close"] - klines_30m[start_idx]["close"]) / klines_30m[start_idx]["close"] * 100
 
     if total == 0:
-        print(f"  ⚠️  未触发任何交易")
+        print(f"   ⚠️  未触发任何交易")
         return {
             "strategy": strategy_name, "symbol": symbol, "asset_type": asset_type,
             "tier": tier,
@@ -576,6 +457,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "trades": [],
         }
 
+    # 理论统计
     wins = [t for t in trades if t["pnl_usd"] > 0]
     losses = [t for t in trades if t["pnl_usd"] <= 0]
     win_rate = len(wins) / total * 100
@@ -591,6 +473,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     long_win_rate = len([t for t in long_trades if t["pnl_usd"] > 0]) / len(long_trades) * 100 if long_trades else 0
     short_win_rate = len([t for t in short_trades if t["pnl_usd"] > 0]) / len(short_trades) * 100 if short_trades else 0
 
+    # 理论资金曲线
     cap = capital
     peak = cap
     max_dd = 0
@@ -600,6 +483,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         dd = (peak - cap) / peak if peak > 0 else 0
         if dd > max_dd: max_dd = dd
 
+    # 实盘资金曲线
     cap_r = capital
     peak_r = cap_r
     max_dd_r = 0
@@ -646,14 +530,14 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     report["rating"] = rating
     report["rating_desc"] = rating_desc
 
-    print(f"  ✅ 【结算】{total}笔 | 胜率{win_rate:.1f}% | "
+    print(f"   ✅ {total}笔 | 胜率{win_rate:.1f}% | "
           f"理论{total_return:.2f}% → 实盘{total_return_real:.2f}% | "
           f"基准{buy_hold:.2f}% | {rating}")
     return report
 
 
 # ============================================================
-# 从 config.json 读取回测标的（分层）
+# 标的读取（从 config.json 的 backtest_tiers / backtest_watchlist）
 # ============================================================
 def resolve_backtest_symbols(cfg, cli_symbols=None):
     """
@@ -688,10 +572,9 @@ def resolve_backtest_symbols(cfg, cli_symbols=None):
 
 
 # ============================================================
-# HTML 渲染 - 交易卡片
+# HTML 渲染
 # ============================================================
-def _render_trade_card(t, idx):
-    """单笔交易卡片：关键信息加粗，次要信息缩小。"""
+def _render_trade_card(t, idx, show_real=True):
     is_win = t["pnl_usd"] > 0
     is_long = t["direction"].startswith("long")
 
@@ -733,11 +616,11 @@ def _render_trade_card(t, idx):
     html += "</div>"
 
     html += "<div style='margin-top:8px; font-size:13px; color:#333;'>"
-    html += f"<span style='color:#888;'>入场</span> <b>${fmt_price(t['entry_price'])}</b>"
+    html += f"<span style='color:#888;'>入场</span> <b>${t['entry_price']:.4f}</b>"
     html += f" <span style='color:#888;'>→</span> "
-    html += f"<span style='color:#888;'>出场</span> <b>${fmt_price(t['exit_price'])}</b>"
+    html += f"<span style='color:#888;'>出场</span> <b>${t['exit_price']:.4f}</b>"
     html += f" <span style='color:#888;'>|</span> "
-    html += f"<span style='color:#888;'>硬止损</span> <b style='color:#c0392b;'>${fmt_price(stop_price)}</b>"
+    html += f"<span style='color:#888;'>硬止损</span> <b style='color:#c0392b;'>${stop_price:.4f}</b>"
     html += "</div>"
 
     html += "<div style='margin-top:6px; font-size:12px; color:#888; line-height:1.6;'>"
@@ -746,23 +629,24 @@ def _render_trade_card(t, idx):
     html += f" &nbsp;·&nbsp; 🚪 {t.get('exit_reason', '')}"
     html += "</div>"
 
-    html += "<div style='margin-top:6px; font-size:12px; color:#666; line-height:1.6; background:#fff; padding:6px 10px; border-radius:4px; border-left:3px solid #95a5a6;'>"
-    html += f"💵 <b>理论盈亏</b>（扣手续费）：<span style='color:{accent};font-weight:bold;'>{pnl_usd_str}</span>"
-    html += f" &nbsp;|&nbsp; 滑点 <b style='color:#c0392b;'>-${slip:.2f}</b>"
-    if fund > 0:
-        html += f" &nbsp;|&nbsp; 资金费率 <b style='color:#c0392b;'>-${fund:.2f}</b>"
-    html += f" &nbsp;|&nbsp; <b>实盘预估</b>：<span style='color:{accent};font-weight:bold;'>{pnl_real_str}</span>"
-    html += "</div>"
+    if show_real:
+        html += "<div style='margin-top:6px; font-size:12px; color:#666; line-height:1.6; background:#fff; padding:6px 10px; border-radius:4px; border-left:3px solid #95a5a6;'>"
+        html += f"💵 <b>理论盈亏</b>（扣手续费）：<span style='color:{accent};font-weight:bold;'>{pnl_usd_str}</span>"
+        html += f" &nbsp;|&nbsp; 滑点 <b style='color:#c0392b;'>-${slip:.2f}</b>"
+        if fund > 0:
+            html += f" &nbsp;|&nbsp; 资金费率 <b style='color:#c0392b;'>-${fund:.2f}</b>"
+        html += f" &nbsp;|&nbsp; <b>实盘预估</b>：<span style='color:{accent};font-weight:bold;'>{pnl_real_str}</span>"
+        html += "</div>"
 
     html += "</div>"
     return html
 
 
-def _render_trades_cards(trades):
+def _render_trades_cards(trades, show_real=True):
     if not trades:
         return ""
     sorted_trades = sorted(trades, key=lambda t: t.get("entry_time_ms", 0))
-    html = "".join(_render_trade_card(t, i) for i, t in enumerate(sorted_trades, 1))
+    html = "".join(_render_trade_card(t, i, show_real=show_real) for i, t in enumerate(sorted_trades, 1))
     html += (
         "<p style='color:#888; font-size:11px; margin:10px 0 0 0; line-height:1.6;'>"
         "💡 <b>时间</b>：北京时间（BJT, UTC+8）<br>"
@@ -794,7 +678,7 @@ def _render_consistency_notice(fee, capital):
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">硬止损</td>
-            <td style="padding:6px 8px;">✅ 按币种分层 ATR 倍数（1.5× / 2.0× / 2.5×）+ 1.5%~3.5% 双保险</td>
+            <td style="padding:6px 8px;">✅ 按币种分层 ATR 倍数（1.5× / 2.0× / 2.5×）</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">移动止盈</td>
@@ -803,14 +687,6 @@ def _render_consistency_notice(fee, capital):
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">MA10 离场</td>
             <td style="padding:6px 8px;">✅ 价格跌破/突破 MA10 立即离场</td>
-        </tr>
-        <tr style="border-bottom:1px solid #90caf9;">
-            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">轨道3（独立）</td>
-            <td style="padding:6px 8px;">✅ 暴跌反弹不受状态机约束，但需 4/4 全满足（回撤≥20% + RSI≤25 + KDJ<-15 + 止跌形态）</td>
-        </tr>
-        <tr style="border-bottom:1px solid #90caf9;">
-            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">波动率熔断</td>
-            <td style="padding:6px 8px;">✅ ATR/价格 > 3% 时所有轨道自动暂停</td>
         </tr>
         <tr>
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">仓位基数</td>
@@ -825,48 +701,47 @@ def _render_consistency_notice(fee, capital):
 
 
 def _render_single_detail(r, fee=0.0005, capital=10000):
-    """
-    单标的汇总卡（精简版，不含交易明细列表）。
-    交易明细已移到 CSV 附件中。
-    """
     tier = r.get("tier", "satellite")
     tier_cn = TIER_CN.get(tier, tier)
     tier_icon = TIER_ICON.get(tier, "•")
     tier_color = TIER_COLOR.get(tier, "#333")
 
-    html = "<div style='background:#fff;padding:18px;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:15px;'>"
+    html = "<div style='background:#fff;padding:20px;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:20px;'>"
 
-    # 标题行
-    html += "<div style='display:flex; justify-content:space-between; align-items:center; border-bottom:2px dashed #eee; padding-bottom:10px; margin-bottom:12px;'>"
+    html += "<div style='display:flex; justify-content:space-between; align-items:center; border-bottom:2px dashed #eee; padding-bottom:12px; margin-bottom:15px;'>"
     html += f"<div>"
-    html += f"<span style='background:{tier_color};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;margin-right:8px;'>{tier_icon} {tier_cn}</span>"
-    html += f"<span style='font-size:18px; font-weight:900; color:#2c3e50;'>{r['symbol'].replace('_USDT','')}</span>"
-    html += f"<span style='margin-left:10px; font-size:14px; color:#e67e22; font-weight:bold;'>{r['rating']}</span>"
+    html += f"<span style='background:{tier_color};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;margin-right:10px;'>{tier_icon} {tier_cn}</span>"
+    html += f"<span style='font-size:22px; font-weight:900; color:#2c3e50;'>{r['symbol'].replace('_USDT','')}</span>"
+    html += f"<span style='margin-left:12px; font-size:15px; color:#e67e22; font-weight:bold;'>{r['rating']}</span>"
     html += f"</div>"
-    html += f"<div style='font-size:12px; color:#888;'>{r['data_source']}</div>"
+    html += f"<div style='font-size:13px; color:#888;'>{r['data_source']}</div>"
     html += "</div>"
 
     bs = r.get("backtest_start_ms")
     be = r.get("backtest_end_ms")
     if bs and be:
-        html += (f"<p style='color:#888;font-size:12px;margin:0 0 10px 0;'>"
-                 f"📅 {fmt_ts(bs)} ~ {fmt_ts(be)}（{r['bars_total']} 根 30m）</p>")
+        html += (f"<p style='color:#555;font-size:13px;margin:0 0 12px 0;'>"
+                 f"<b>📅 回测区间：</b>{fmt_ts(bs)} ~ {fmt_ts(be)}"
+                 f"（共 {r['bars_total']} 根 30m）</p>")
+
+    html += f"<p style='color:#666;font-size:13px;margin:0 0 15px 0;'>{r['rating_desc']}</p>"
 
     if r["total_trades"] == 0:
-        html += f"<p style='color:#999;padding:12px;background:#f8f9fa;border-radius:6px;font-size:13px;'>⚠️ 未触发交易。基准收益：<b>{r['benchmark_return']}%</b></p>"
+        html += f"<p style='color:#999;padding:15px;background:#f8f9fa;border-radius:6px;'>⚠️ 本区间未触发任何交易信号。基准收益：<b>{r['benchmark_return']}%</b></p>"
     else:
         ret_color = "#27ae60" if r["total_return"] > 0 else "#c0392b"
+        exc_color = "#27ae60" if r["excess_return"] > 0 else "#c0392b"
         rret_color = "#27ae60" if r["total_return_real"] > 0 else "#c0392b"
-        exc_color = "#27ae60" if r["excess_return_real"] > 0 else "#c0392b"
+        rexc_color = "#27ae60" if r["excess_return_real"] > 0 else "#c0392b"
 
-        html += "<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(100px, 1fr)); gap:8px; margin-bottom:10px;'>"
+        html += "<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(115px, 1fr)); gap:10px; margin-bottom:15px;'>"
 
         def metric_box(label, value, color="#2c3e50", is_important=False):
             border = "2px solid #e74c3c" if is_important else "1px solid #eee"
             return (
-                f"<div style='background:#fafbfc; padding:8px; border-radius:6px; text-align:center; border:{border};'>"
-                f"<div style='color:#888; font-size:10.5px; margin-bottom:2px;'>{label}</div>"
-                f"<div style='color:{color}; font-size:15px; font-weight:bold;'>{value}</div>"
+                f"<div style='background:#fafbfc; padding:10px; border-radius:8px; text-align:center; border:{border};'>"
+                f"<div style='color:#888; font-size:11px; margin-bottom:3px;'>{label}</div>"
+                f"<div style='color:{color}; font-size:17px; font-weight:bold;'>{value}</div>"
                 "</div>"
             )
 
@@ -874,17 +749,23 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
         html += metric_box("胜率", f"{r['win_rate']}%")
         html += metric_box("理论收益", f"{r['total_return']}%", ret_color)
         html += metric_box("实盘预估", f"{r['total_return_real']}%", rret_color, is_important=True)
-        html += metric_box("实盘超额", f"{r['excess_return_real']}%", exc_color)
-        html += metric_box("回撤", f"{r['max_dd']}%", "#e67e22")
+        html += metric_box("基准收益", f"{r['benchmark_return']}%", "#666")
+        html += metric_box("理论超额", f"{r['excess_return']}%", exc_color)
+        html += metric_box("实盘超额", f"{r['excess_return_real']}%", rexc_color)
+        html += metric_box("最大回撤", f"{r['max_dd']}%", "#e67e22")
         html += metric_box("盈亏比", r["profit_factor"])
         html += metric_box("夏普", r["sharpe"])
         html += "</div>"
 
-        html += "<div style='background:#f8f9fa; padding:8px 12px; border-radius:6px; font-size:12px;'>"
-        html += f"🟢 做多 <b>{r['long_trades']}</b> 笔（{r['long_win_rate']}%） &nbsp;|&nbsp; "
-        html += f"🔴 做空 <b>{r['short_trades']}</b> 笔（{r['short_win_rate']}%） &nbsp;|&nbsp; "
-        html += f"⏱ 平均持仓 <b>{r['avg_bars_held']}</b> 根"
+        html += "<div style='background:#f8f9fa; padding:12px; border-radius:8px; font-size:13px; margin-bottom:15px;'>"
+        html += f"<span style='color:#27ae60;'>🟢 做多：<b>{r['long_trades']}</b> 笔（{r['long_win_rate']}%）</span>"
+        html += " &nbsp;|&nbsp; "
+        html += f"<span style='color:#c0392b;'>🔴 做空：<b>{r['short_trades']}</b> 笔（{r['short_win_rate']}%）</span>"
+        html += f" &nbsp;|&nbsp; <span style='color:#666;'>平均持仓 <b>{r['avg_bars_held']}</b> 根30m</span>"
         html += "</div>"
+
+        html += "<h4 style='margin:20px 0 12px 0; color:#2c3e50; font-size:15px;'>📝 交易明细（共 {} 笔）</h4>".format(r["total_trades"])
+        html += _render_trades_cards(r["trades"], show_real=True)
 
     html += "</div>"
     return html
@@ -926,55 +807,7 @@ def _render_tier_table(reports, tier):
     html += "</table>"
     html += "<p style='color:#888;font-size:11px;margin-top:6px;'>💡 按实盘预估收益降序排列。「实盘预估」已扣除滑点和资金费率。</p>"
     return html
-    
-def _generate_trades_csv(all_reports):
-    """
-    生成合并的交易明细 CSV（所有标的合并到一个文件）。
-    加 UTF-8 BOM，确保 Excel 打开不乱码。
-    """
-    import csv
-    import io
 
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow([
-        "标的", "分层", "方向", "入场时间", "入场价", "出场时间", "出场价",
-        "盈亏%", "理论盈亏U", "实盘盈亏U", "滑点U", "资金费率U", "手续费U",
-        "持仓根数", "离场原因", "硬止损价", "风险%"
-    ])
-
-    # 按分层 + 实盘收益排序，方便 Excel 里阅读
-    tier_order = {"core": 0, "satellite": 1, "watch": 2}
-    sorted_reports = sorted(all_reports,
-                            key=lambda x: (tier_order.get(x.get("tier", "satellite"), 1),
-                                           -x.get("total_return_real", 0)))
-
-    for r in sorted_reports:
-        sym = r["symbol"].replace("_USDT", "")
-        tier = r.get("tier", "satellite")
-        for t in r.get("trades", []):
-            writer.writerow([
-                sym,
-                tier,
-                "多" if t["direction"].startswith("long") else "空",
-                fmt_ts(t.get("entry_time_ms")),
-                round(t["entry_price"], 6),
-                fmt_ts(t.get("exit_time_ms")),
-                round(t["exit_price"], 6),
-                round(t["pnl_pct"] * 100, 2),
-                round(t.get("pnl_usd", 0), 2),
-                round(t.get("pnl_usd_real", 0), 2),
-                round(t.get("slippage_usd", 0), 2),
-                round(t.get("funding_usd", 0), 2),
-                round(t.get("fee_usd", 0), 2),
-                t.get("bars_held", 0),
-                t.get("exit_reason", ""),
-                round(t.get("stop_price", 0), 6),
-                round(t.get("risk_pct", 0), 2),
-            ])
-
-    # UTF-8 BOM 让 Excel 正确识别编码
-    return "\ufeff" + buf.getvalue()
 
 def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005, capital=10000):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
@@ -1036,11 +869,11 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
         if by_tier[tier]:
             html += _render_tier_table(by_tier[tier], tier)
 
-    # ---------- 分层详细汇总卡（不含交易明细，明细在附件 CSV 里） ----------
+    # ---------- 分层详细卡片 ----------
     for tier in TIER_ORDER:
         reports_in_tier = sorted(
-            [r for r in by_tier[tier]],
-            key=lambda x: x.get("total_return_real", 0), reverse=True
+            [r for r in by_tier[tier] if r["total_trades"] > 0],
+            key=lambda x: x["total_return_real"], reverse=True
         )
         if not reports_in_tier:
             continue
@@ -1049,25 +882,11 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
         tier_color = TIER_COLOR.get(tier, "#333")
 
         html += f"<h3 style='margin-top:40px; color:{tier_color}; border-left:5px solid {tier_color}; padding-left:10px;'>"
-        html += f"🔍 {tier_icon} {tier_cn} · 各标的汇总（{len(reports_in_tier)} 个）</h3>"
-        # 所有标的都展示，只显示汇总卡，不显示明细列表
-        for r in reports_in_tier:
+        html += f"🔍 {tier_icon} {tier_cn} · 详细交易明细</h3>"
+        # 观察池只展示 top 5，避免报告过长
+        detail_n = 5 if tier == "watch" else len(reports_in_tier)
+        for r in reports_in_tier[:detail_n]:
             html += _render_single_detail(r, fee=fee, capital=capital)
-
-    # ---------- 附件提示 ----------
-    html += """
-    <div style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); padding:20px; border-radius:10px; margin-top:30px; border-left:5px solid #f39c12;">
-        <h3 style="margin:0 0 10px 0; color:#b8860b; font-size:17px;">📎 完整交易明细</h3>
-        <p style="margin:0; font-size:14px; color:#555; line-height:1.7;">
-            为避免邮件过长，<b>每笔交易的详细数据已导出为 CSV 附件</b>。<br>
-            文件名格式：<code>backtest_trades_YYYYMMDD_HHMM.csv</code><br>
-            用 Excel 打开即可筛选、排序、透视分析。
-        </p>
-        <p style="margin:10px 0 0 0; font-size:13px; color:#888;">
-            CSV 字段：标的、分层、方向、入场/出场时间、入场/出场价、盈亏%、理论盈亏、实盘盈亏、滑点、资金费率、手续费、持仓根数、离场原因、硬止损、风险%
-        </p>
-    </div>
-    """
 
     html += "<hr style='margin-top:40px;'><p style='color:#aaa;font-size:11px;text-align:center;'>参谋长分层回测报告 · 仅供交流参考，不构成投资建议</p>"
     html += "</body></html>"
@@ -1104,7 +923,7 @@ def main():
     symbol_list, tier_map = resolve_backtest_symbols(cfg, cli_symbols)
 
     print(f"\n{'='*70}")
-    print(f"📊 参谋长分层回测引擎")
+    print(f"📊 参谋长分层回测引擎 v7")
     print(f"   策略：{strategies}")
     print(f"   标的数：{len(symbol_list)}")
     tier_count = {"core": 0, "satellite": 0, "watch": 0}
@@ -1142,19 +961,8 @@ def main():
     now_str = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     subject = f"【参谋长分层回测】{now_str} | {len(all_reports)}标的 | {with_trades}个有交易"
 
-    # 🚀 生成合并的 CSV 附件
     try:
-        csv_content = _generate_trades_csv(all_reports)
-        csv_filename = f"backtest_trades_{datetime.now(BJT).strftime('%Y%m%d_%H%M')}.csv"
-        attachments = [(csv_filename, csv_content.encode("utf-8"), "text/csv")]
-        total_trades = sum(len(r.get("trades", [])) for r in all_reports)
-        print(f"\n📎 已生成 CSV 附件：{csv_filename}（{total_trades} 笔交易）")
-    except Exception as e:
-        print(f"\n⚠️ CSV 生成失败（将只发 HTML）：{e}")
-        attachments = None
-
-    try:
-        send_html_email(subject, html, attachments=attachments)
+        send_html_email(subject, html)
         print("\n📧 回测报告已发送")
     except Exception as e:
         print(f"\n❌ 邮件发送失败：{e}")
