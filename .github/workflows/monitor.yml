@@ -1,11 +1,10 @@
 name: 多标的的合约监控
 
 on:
-
   workflow_dispatch:
 
 concurrency:
-  group: market-monitor
+  group: market-db-lock
   cancel-in-progress: false
 
 jobs:
@@ -18,7 +17,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 🚀 从 Cache 恢复数据库
+      # 从 Cache 恢复数据库
       - name: 恢复数据库
         uses: actions/cache@v4
         with:
@@ -38,14 +37,14 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
 
-      # 🚀 把更新后的 DB 存回 Cache
+      # 把更新后的 DB 存回 Cache
       - name: 保存数据库到 Cache
         uses: actions/cache@v4
         with:
           path: data/market.db
           key: market-db-${{ github.run_id }}
 
-      # 🚀 额外备份：把 DB 作为 artifact 上传，保留30天（你可以随时下载）
+      # 额外备份
       - name: 上传数据库备份
         uses: actions/upload-artifact@v4
         with:
