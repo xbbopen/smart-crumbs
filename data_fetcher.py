@@ -8,6 +8,7 @@ import logging
 from data_db import (
     get_last_timestamp, upsert_klines, load_klines, count_klines,
     get_source_override, set_source_override, clear_source_override,
+    get_max_available, set_max_available, clear_max_available,
 )
 
 log = logging.getLogger(__name__)
@@ -349,7 +350,7 @@ def _fetch_from_source_range(source_name, symbol, interval, limit, start_ms, end
 # ============================================================
 def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     """
-    DB优先 + 数据源 override 缓存 + Hyperliquid 上线感知。
+    DB优先 + 数据源 override + max_available（该标的能拿到的最大根数）。
     """
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
@@ -361,11 +362,29 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     # 读取 override
     override = get_source_override(symbol, interval)
 
-    # 🚀 关键改进：Hyperliquid 现已上线该合约 → 作废旧 override
+    # Hyperliquid 现已上线该合约 → 作废旧 override + max_available
     if asset_type == "futures" and override and override != "hyperliquid":
         log.info(f"    [{symbol}][{interval}] ⚡ Hyperliquid 现已上线该合约，作废旧 override ({override})")
         clear_source_override(symbol, interval)
+        clear_max_available(symbol, interval)
         override = None
+
+    # 🚀 读取 max_available
+    max_available = get_max_available(symbol, interval)
+
+    # 🚀 计算有效目标：min(desired_bars, max_available)
+    if max_available and max_available > 0:
+        effective_target = min(desired_bars, max_available)
+    else:
+        effective_target = desired_bars
+
+    # 🚀 判断是否走全量拉取
+    is_full_fetch = (not last_ts) or (existing_count < effective_target)
+
+    if not is_full_fetch and max_available and existing_count >= max_available:
+        log.info(f"[{symbol}][{interval}] 数据已就绪（{existing_count}/{max_available}，已到该币上限）")
+    elif not is_full_fetch:
+        log.info(f"[{symbol}][{interval}] 数据已最新（{existing_count}/{effective_target}）")
 
     # 构建尝试顺序
     sources_to_try = []
@@ -385,30 +404,40 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     actual_source = None
     klines_new = []
 
-    is_full_fetch = (not last_ts) or (existing_count < desired_bars)
-
     if is_full_fetch:
-        log.warning(f"[{symbol}][{interval}] DB数据不足({existing_count}/{desired_bars})，重新全量拉取")
+        log.warning(f"[{symbol}][{interval}] DB数据不足({existing_count}/{effective_target})，重新全量拉取")
         for src in sources_to_try:
             klines_new = _fetch_from_source_full(src, symbol, interval, desired_bars)
             if klines_new:
                 actual_source = src
                 set_source_override(symbol, interval, src)
-                log.info(f"    [{symbol}][{interval}] ✅ 使用 {src} 成功，写入 override")
+                # 🚀 关键：如果返回量 < desired_bars，记录 max_available
+                if len(klines_new) < desired_bars:
+                    set_max_available(symbol, interval, len(klines_new))
+                    log.info(f"    [{symbol}][{interval}] ✅ 使用 {src} 成功，拿到 {len(klines_new)} 根（已记录该币上限）")
+                else:
+                    # 已经拉满，清除旧的 max_available
+                    clear_max_available(symbol, interval)
+                    log.info(f"    [{symbol}][{interval}] ✅ 使用 {src} 成功，拉满 {len(klines_new)} 根")
                 break
         if not actual_source:
             clear_source_override(symbol, interval)
             log.warning(f"    [{symbol}][{interval}] 所有源都失败，清除 override")
     else:
+        # 增量拉取
         fetch_start = last_ts + interval_ms
         if fetch_start >= now_ms:
-            log.info(f"[{symbol}][{interval}] 数据已最新")
+            pass  # 数据已最新，跳过
         else:
             for src in sources_to_try:
                 klines_new = _fetch_from_source_range(src, symbol, interval, 5000, fetch_start, now_ms)
                 if klines_new:
                     actual_source = src
                     set_source_override(symbol, interval, src)
+                    # 如果有新增数据，更新 max_available
+                    new_total = existing_count + len(klines_new)
+                    if max_available and new_total > max_available:
+                        set_max_available(symbol, interval, new_total)
                     break
 
     if klines_new:
