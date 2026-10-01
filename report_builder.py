@@ -529,7 +529,7 @@ def build_error_card(r, err_msg: str):
 
 
 # ============================================================
-# 十、热点开场段落
+# 十、热点开场段落（浅色现代风 + 胶囊标签）
 # ============================================================
 def build_hotspot_section(hotspot):
     if not hotspot:
@@ -537,59 +537,80 @@ def build_hotspot_section(hotspot):
     label = hotspot.get("session_label", "")
     vibe = hotspot.get("session_vibe", "")
 
-    def _fmt_top_gainer(items):
-        return " | ".join(
-            f"<b style='color:#e74c3c;'>{x['sym']} {x['pct']:+.2f}%</b>"
+    # --- 胶囊标签渲染工具 ---
+    def _badge_gainer(items):
+        if not items: return "<span style='color:#999;font-size:13px;'>无</span>"
+        return "".join([
+            f"<span style='display:inline-block;background:#fdeaea;color:#c0392b;padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {x['pct']:+.2f}%</span>"
             for x in items
-        ) or "无"
+        ])
 
-    def _fmt_top_loser(items):
-        return " | ".join(
-            f"<b style='color:#27ae60;'>{x['sym']} {x['pct']:+.2f}%</b>"
+    def _badge_loser(items):
+        if not items: return "<span style='color:#999;font-size:13px;'>无</span>"
+        return "".join([
+            f"<span style='display:inline-block;background:#eafaf1;color:#27ae60;padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {x['pct']:+.2f}%</span>"
             for x in items
-        ) or "无"
+        ])
 
-    def _fmt_rsi(items):
-        return " | ".join(
-            f"<b>{x['sym']} {x['rsi']:.1f}</b>"
+    def _badge_rsi(items, color, bg):
+        if not items: return "<span style='color:#999;font-size:13px;'>无</span>"
+        return "".join([
+            f"<span style='display:inline-block;background:{bg};color:{color};padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {x['rsi']:.1f}</span>"
             for x in items
-        ) or "无"
+        ])
 
-    def _fmt_vol(items):
-        return " | ".join(
-            f"<b>{x['sym']} 爆量 {x['mult']:.1f}x</b>"
+    def _badge_vol(items):
+        if not items: return "<span style='color:#999;font-size:13px;'>无</span>"
+        return "".join([
+            f"<span style='display:inline-block;background:#f4ecf7;color:#8e44ad;padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} 爆量 {x['mult']:.1f}x</span>"
             for x in items
-        ) or "无"
+        ])
 
-    def _fmt_fr(items):
-        return " | ".join(
-            f"<b>{x['sym']} {x['fr']:+.4f}%</b>"
+    def _badge_fr(items):
+        if not items: return "<span style='color:#999;font-size:13px;'>无</span>"
+        return "".join([
+            f"<span style='display:inline-block;background:#fef9e7;color:#d35400;padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {x['fr']:+.4f}%</span>"
             for x in items
-        ) or "无"
+        ])
 
-    def _fmt_near(items, is_high=True):
-        return " | ".join(
-            f"<b>{x['sym']} 距{'前高' if is_high else '前低'} {x['dist']:.2f}%</b>"
+    def _badge_near(items, is_high=True):
+        if not items: return "<span style='color:#999;font-size:13px;'>无</span>"
+        color = "#8e44ad" if is_high else "#2980b9"
+        bg = "#f4ecf7" if is_high else "#eaf2f8"
+        prefix = "距前高" if is_high else "距前低"
+        return "".join([
+            f"<span style='display:inline-block;background:{bg};color:{color};padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {prefix} {x['dist']:.2f}%</span>"
             for x in items
-        ) or "无"
+        ])
 
+    # --- 组装 HTML ---
     html = (
-        "<div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); "
-        "color: #e0e0e0; padding: 20px; border-radius: 12px; margin-bottom: 25px; "
-        "border: 1px solid #2c3e50; box-shadow: 0 4px 15px rgba(0,0,0,0.3);'>"
-        f"<h3 style='margin: 0 0 12px 0; color: #ffc107; font-size: 20px; letter-spacing: 1px;'>"
-        f"🔥 本期市场焦点（{label}）</h3>"
-        f"<p style='margin: 0 0 15px 0; color: #a0a0a0; font-size: 13px; font-style: italic;'>{vibe}</p>"
-        "<table style='width:100%; font-size: 14px; border-collapse: collapse;'>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107; width: 110px;'>📈 领涨</td><td>{_fmt_top_gainer(hotspot.get('top_gainers', []))}</td></tr>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107;'>📉 领跌</td><td>{_fmt_top_loser(hotspot.get('top_losers', []))}</td></tr>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107;'>🌡️ 贪婪</td><td style='color:#ff5252;'>{_fmt_rsi(hotspot.get('extreme_greed', []))}</td></tr>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107;'>🧊 恐慌</td><td style='color:#64b5f6;'>{_fmt_rsi(hotspot.get('extreme_fear', []))}</td></tr>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107;'>💥 异动</td><td>{_fmt_vol(hotspot.get('volume_spikes', []))}</td></tr>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107;'>💰 费率</td><td>{_fmt_fr(hotspot.get('funding_extreme', []))}</td></tr>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107;'>⚡ 逼近前高</td><td>{_fmt_near(hotspot.get('near_highs', []), True)}</td></tr>"
-        f"<tr><td style='padding: 6px 0; color:#ffc107;'>🛡️ 逼近前低</td><td>{_fmt_near(hotspot.get('near_lows', []), False)}</td></tr>"
-        "</table></div>"
+        "<div style='background: #ffffff; border-radius: 12px; margin-bottom: 25px; "
+        "border: 1px solid #e1e8ed; box-shadow: 0 4px 12px rgba(0,0,0,0.05); overflow: hidden;'>"
+        
+        # 头部标题区
+        "<div style='background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%); padding: 15px 20px;'>"
+        f"<h3 style='margin: 0; color: #ffc107; font-size: 18px; letter-spacing: 1px;'>🔥 本期市场焦点（{label}）</h3>"
+        f"<p style='margin: 5px 0 0 0; color: #bdc3c7; font-size: 12px;'>{vibe}</p>"
+        "</div>"
+        
+        # 数据内容区（表格布局，对齐更工整）
+        "<div style='padding: 15px 20px;'>"
+        "<table style='width:100%; font-size: 13px; border-collapse: collapse;'>"
+        
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; width: 100px; color:#e74c3c; font-weight:bold;'>📈 领涨</td><td style='padding: 10px 0;'>{_badge_gainer(hotspot.get('top_gainers', []))}</td></tr>"
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#27ae60; font-weight:bold;'>📉 领跌</td><td style='padding: 10px 0;'>{_badge_loser(hotspot.get('top_losers', []))}</td></tr>"
+        
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#e67e22; font-weight:bold;'>🌡️ 贪婪</td><td style='padding: 10px 0;'>{_badge_rsi(hotspot.get('extreme_greed', []), '#c0392b', '#fdeaea')}</td></tr>"
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#2980b9; font-weight:bold;'>🧊 恐慌</td><td style='padding: 10px 0;'>{_badge_rsi(hotspot.get('extreme_fear', []), '#2471a3', '#eaf2f8')}</td></tr>"
+        
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#8e44ad; font-weight:bold;'>💥 异动</td><td style='padding: 10px 0;'>{_badge_vol(hotspot.get('volume_spikes', []))}</td></tr>"
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#d35400; font-weight:bold;'>💰 费率</td><td style='padding: 10px 0;'>{_badge_fr(hotspot.get('funding_extreme', []))}</td></tr>"
+        
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#8e44ad; font-weight:bold;'>⚡ 逼近前高</td><td style='padding: 10px 0;'>{_badge_near(hotspot.get('near_highs', []), True)}</td></tr>"
+        f"<tr><td style='padding: 10px 0; color:#2980b9; font-weight:bold;'>🛡️ 逼近前低</td><td style='padding: 10px 0;'>{_badge_near(hotspot.get('near_lows', []), False)}</td></tr>"
+        
+        "</table></div></div>"
     )
     return html
 
