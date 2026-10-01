@@ -560,6 +560,19 @@ def find_recent_high(klines, lookback=199):
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return max(k["high"] for k in subset) if subset else None
 
+def find_recent_high_with_ts(klines, lookback=199):
+    """
+    找出近期最高点，返回 (最高价, 该根K线的时间戳)。
+    排除当前最新一根，避免污染。
+    """
+    if not klines or len(klines) < 2:
+        return None, None
+    subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
+    if not subset:
+        return None, None
+    peak = max(subset, key=lambda k: k["high"])
+    return peak["high"], peak["timestamp"]
+
 def find_recent_low(klines, lookback=199):
     subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
     return min(k["low"] for k in subset) if subset else None
@@ -606,6 +619,9 @@ def build_market_data(symbol, asset_type):
         "rsi_1h": None, "kdj_1h": None, "boll_1h": None, "macd_1h": None, "rsi_div_1h": None,
         "ema20_4h": None, "ema50_4h": None, "rsi_4h": None, "macd_4h": None, "trend_4h": None,
         "ema50_1d": None, "rsi_1d": None, "trend_1d": None,
+        "recent_high": None, "recent_low": None,
+        "recent_high_ts": None,
+        "recent_high_4h": None, "recent_high_4h_ts": None,
     }
 
     is_hl = False
@@ -661,8 +677,13 @@ def build_market_data(symbol, asset_type):
     md["atr"] = calc_atr(klines_30m, 14)
     md["rsi"] = calc_rsi(klines_30m, 14)
     md["adx"] = calc_adx(klines_30m, 14)
-    md["recent_high"] = find_recent_high(klines_30m, 199)
+    md["recent_high"], md["recent_high_ts"] = find_recent_high_with_ts(klines_30m, 199)
     md["recent_low"] = find_recent_low(klines_30m, 199)
+    # 🚀 4H 前高（用于压力位雷达）
+    if len(klines_4h) >= 20:
+        md["recent_high_4h"], md["recent_high_4h_ts"] = find_recent_high_with_ts(klines_4h, 199)
+    else:
+        md["recent_high_4h"], md["recent_high_4h_ts"] = None, None
 
     if len(klines_1h) >= 20:
         md["rsi_1h"] = calc_rsi(klines_1h, 14)
