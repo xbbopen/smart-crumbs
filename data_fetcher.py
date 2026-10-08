@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-统一数据获取模块（DB优先 + 增量 + 源切换保护 + 智能探测 + 数据源缓存）
+统一数据获取模块（DB优先 + 增量 + 源切换保护 + 智能探测 + 数据源缓存 + 衍生品指标）
+
+v2 改动：
+1. fetch_hyperliquid_metrics 增加 markPx / oraclePx / basis_pct
+2. 新增 calc_vwap（滚动 VWAP）
+3. build_market_data 中计算 vwap_30m、basis_pct、oi_change_pct_1h/4h
+4. OI 历史写入 data_db，供跨运行计算变化率
 """
 import time, requests, math
 import logging
@@ -9,6 +15,7 @@ from data_db import (
     get_last_timestamp, upsert_klines, load_klines, count_klines,
     get_source_override, set_source_override, clear_source_override,
     get_max_available, set_max_available, clear_max_available,
+    append_oi_history, get_oi_change,
 )
 
 log = logging.getLogger(__name__)
@@ -286,6 +293,11 @@ def fetch_hyperliquid_klines(symbol, interval="30m", limit=200, start_ms=None, e
 
 
 def fetch_hyperliquid_metrics(symbol, current_price):
+    """
+    拉取 Hyperliquid 合约指标。
+    返回 dict 包含：funding_rate_raw / funding_rate / open_interest /
+    open_interest_coin / day_volume / mark_px / oracle_px / basis_pct
+    """
     coin = to_hyperliquid_coin(symbol)
     ok, data = _request_with_retry(HYPERLIQUID_INFO_URL, method="POST",
                                    source="hyperliquid", json={"type": "metaAndAssetCtxs"})
@@ -296,14 +308,38 @@ def fetch_hyperliquid_metrics(symbol, current_price):
         for i, asset in enumerate(meta.get("universe", [])):
             if asset.get("name", "").upper() == coin.upper():
                 ctx = ctxs[i] if i < len(ctxs) else {}
-                oi_usd = float(ctx.get("openInterest", 0)) * current_price
+
+                oi_coin = float(ctx.get("openInterest", 0) or 0)
+                oi_usd = oi_coin * current_price
+
                 raw_fr = ctx.get("funding", 0)
                 fr_percent = _funding_to_percent(float(raw_fr))
-                return {"funding_rate_raw": float(raw_fr), "funding_rate": fr_percent,
-                        "open_interest": oi_usd,
-                        "day_volume": float(ctx.get("dayNtlVlm", 0))}
-    except Exception:
-        pass
+
+                mark_px = None
+                oracle_px = None
+                basis_pct = None
+                try:
+                    if ctx.get("markPx"):
+                        mark_px = float(ctx["markPx"])
+                    if ctx.get("oraclePx"):
+                        oracle_px = float(ctx["oraclePx"])
+                    if mark_px and oracle_px and oracle_px > 0:
+                        basis_pct = (mark_px - oracle_px) / oracle_px * 100
+                except (TypeError, ValueError):
+                    pass
+
+                return {
+                    "funding_rate_raw": float(raw_fr),
+                    "funding_rate": fr_percent,
+                    "open_interest": oi_usd,
+                    "open_interest_coin": oi_coin,
+                    "day_volume": float(ctx.get("dayNtlVlm", 0) or 0),
+                    "mark_px": mark_px,
+                    "oracle_px": oracle_px,
+                    "basis_pct": basis_pct,
+                }
+    except Exception as e:
+        log.warning(f"[hyperliquid_metrics] {symbol} 解析异常: {type(e).__name__}: {e}")
     return None
 
 
@@ -351,9 +387,6 @@ def get_primary_source(symbol, asset_type):
     return "binance_spot"
 
 
-# ============================================================
-# 按源名调用对应的 fetch 函数
-# ============================================================
 def _fetch_from_source_full(source_name, symbol, interval, target_bars):
     if source_name == "hyperliquid":
         return fetch_klines_from_now(fetch_hyperliquid_klines, symbol, interval, target_bars)
@@ -378,12 +411,9 @@ def _fetch_from_source_range(source_name, symbol, interval, limit, start_ms, end
 
 
 # ============================================================
-# 🚀 核心：fetch_and_cache_klines（带数据源 override + Hyperliquid 上线感知）
+# 核心：fetch_and_cache_klines（带数据源 override + Hyperliquid 上线感知）
 # ============================================================
 def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
-    """
-    DB优先 + 数据源 override + max_available（该标的能拿到的最大根数）。
-    """
     interval_ms = INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
     now_ms = int(time.time() * 1000)
     primary_source = get_primary_source(symbol, asset_type)
@@ -391,10 +421,8 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     last_ts = get_last_timestamp(symbol, interval, source=None)
     existing_count = count_klines(symbol, interval) if last_ts else 0
 
-    # 读取 override
     override = get_source_override(symbol, interval)
 
-    # Hyperliquid 现已上线该合约 → 作废旧 override + max_available
     current_primary = get_primary_source(symbol, asset_type)
     if current_primary == "hyperliquid" and override and override != "hyperliquid":
         log.info(f"    [{symbol}][{interval}] ⚡ Hyperliquid 现已上线该合约，作废旧 override ({override})")
@@ -402,16 +430,13 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
         clear_max_available(symbol, interval)
         override = None
 
-    # 🚀 读取 max_available
     max_available = get_max_available(symbol, interval)
 
-    # 🚀 计算有效目标：min(desired_bars, max_available)
     if max_available and max_available > 0:
         effective_target = min(desired_bars, max_available)
     else:
         effective_target = desired_bars
 
-    # 🚀 判断是否走全量拉取
     is_full_fetch = (not last_ts) or (existing_count < effective_target)
 
     if not is_full_fetch and max_available and existing_count >= max_available:
@@ -419,7 +444,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     elif not is_full_fetch:
         log.info(f"[{symbol}][{interval}] 数据已最新（{existing_count}/{effective_target}）")
 
-    # 构建尝试顺序
     sources_to_try = []
     if override:
         sources_to_try.append(override)
@@ -440,12 +464,10 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     if is_full_fetch:
         log.warning(f"[{symbol}][{interval}] DB数据不足({existing_count}/{effective_target})，重新全量拉取")
         for src in sources_to_try:
-            # 修复：使用 effective_target 而不是 desired_bars
             klines_new = _fetch_from_source_full(src, symbol, interval, effective_target)
             if klines_new:
                 actual_source = src
                 set_source_override(symbol, interval, src)
-                # 🚀 关键：如果返回量 < desired_bars，记录 max_available
                 if len(klines_new) < desired_bars:
                     set_max_available(symbol, interval, len(klines_new))
                     log.info(f"    [{symbol}][{interval}] ✅ 使用 {src} 成功，拿到 {len(klines_new)} 根（已记录该币上限）")
@@ -457,10 +479,9 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
             clear_source_override(symbol, interval)
             log.warning(f"    [{symbol}][{interval}] 所有源都失败，清除 override")
     else:
-        # 增量拉取
         fetch_start = last_ts + interval_ms
         if fetch_start >= now_ms:
-            pass  # 数据已最新，跳过
+            pass
         else:
             for src in sources_to_try:
                 klines_new = _fetch_from_source_range(src, symbol, interval, 5000, fetch_start, now_ms)
@@ -509,7 +530,6 @@ def calc_ema(klines, period):
 
 
 def calc_atr(klines, period=14):
-    """Wilder 平滑 ATR。"""
     if len(klines) < period + 1:
         return None
     trs = []
@@ -526,7 +546,6 @@ def calc_atr(klines, period=14):
 
 
 def calc_rsi(klines, period=14):
-    """Wilder 平滑 RSI。"""
     if len(klines) < period + 1:
         return None
     closes = [k["close"] for k in klines]
@@ -545,7 +564,6 @@ def calc_rsi(klines, period=14):
 
 
 def calc_rsi_series(klines, period=14):
-    """一次性计算 RSI 序列，O(n)。"""
     if len(klines) < period + 1:
         return []
     closes = [k["close"] for k in klines]
@@ -572,12 +590,9 @@ def calc_rsi_series(klines, period=14):
 
 
 def calc_adx(klines, period=14):
-    """Wilder 平滑 ADX。需要至少 2*period+1 根 K 线。"""
     if len(klines) < period * 2 + 1:
         return None
-    trs = []
-    plus_dms = []
-    minus_dms = []
+    trs, plus_dms, minus_dms = [], [], []
     for i in range(1, len(klines)):
         high = klines[i]["high"]
         low = klines[i]["low"]
@@ -671,6 +686,25 @@ def calc_boll(klines, period=20, mult=2):
     return mid + mult * std, mid, mid - mult * std
 
 
+def calc_vwap(klines, period=48):
+    """
+    滚动 VWAP。默认 48 根 30m = 24 小时。
+    使用典型价格 (H+L+C)/3 加权。
+    """
+    if not klines or len(klines) < 2:
+        return None
+    window = klines[-period:] if len(klines) >= period else klines
+    typical_sum = 0.0
+    vol_sum = 0.0
+    for k in window:
+        typical = (k["high"] + k["low"] + k["close"]) / 3.0
+        typical_sum += typical * k["volume"]
+        vol_sum += k["volume"]
+    if vol_sum <= 0:
+        return None
+    return typical_sum / vol_sum
+
+
 def find_recent_high(klines, lookback=199):
     subset = klines[-lookback - 1:-1] if len(klines) > lookback + 1 else klines[:-1]
     return max(k["high"] for k in subset) if subset else None
@@ -726,6 +760,11 @@ def build_market_data(symbol, asset_type):
         "rsi_1h": None, "kdj_1h": None, "boll_1h": None, "macd_1h": None, "rsi_div_1h": None,
         "ema20_4h": None, "ema50_4h": None, "rsi_4h": None, "macd_4h": None, "trend_4h": None,
         "ema50_1d": None, "rsi_1d": None, "trend_1d": None,
+        # 🚀 新增衍生品字段
+        "vwap_30m": None,
+        "basis_pct": None,
+        "oi_change_pct_1h": None,
+        "oi_change_pct_4h": None,
     }
 
     is_hl = False
@@ -784,6 +823,9 @@ def build_market_data(symbol, asset_type):
     md["recent_high"] = find_recent_high(klines_30m, 199)
     md["recent_low"] = find_recent_low(klines_30m, 199)
 
+    # 🚀 VWAP
+    md["vwap_30m"] = calc_vwap(klines_30m, 48)
+
     if len(klines_1h) >= 20:
         md["rsi_1h"] = calc_rsi(klines_1h, 14)
         k, d, j = calc_kdj(klines_1h, 9)
@@ -822,6 +864,7 @@ def build_market_data(symbol, asset_type):
         else:
             md["trend_1d"] = "neutral"
 
+    # 🚀 衍生品指标（OI / 基差 / 费率）
     if md["data_mode"] == "futures" and is_hl:
         metrics = fetch_hyperliquid_metrics(symbol, price)
         if metrics:
@@ -830,5 +873,16 @@ def build_market_data(symbol, asset_type):
             md["open_interest"] = metrics["open_interest"]
             md["day_volume"] = metrics["day_volume"]
             md["funding_percentile"] = _funding_to_percentile(metrics["funding_rate"])
+            md["basis_pct"] = metrics.get("basis_pct")
+
+            # OI 历史 + 变化率
+            oi_coin = metrics.get("open_interest_coin")
+            if oi_coin and oi_coin > 0:
+                try:
+                    append_oi_history(symbol, "30m", oi_coin)
+                    md["oi_change_pct_1h"] = get_oi_change(symbol, "30m", lookback_minutes=60)
+                    md["oi_change_pct_4h"] = get_oi_change(symbol, "30m", lookback_minutes=240)
+                except Exception as e:
+                    log.warning(f"[{symbol}] OI 历史处理异常: {type(e).__name__}: {e}")
 
     return md, "ok"
