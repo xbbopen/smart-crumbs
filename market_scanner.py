@@ -34,6 +34,9 @@ def _empty_hotspot():
         "near_highs": [],
         "near_lows": [],
         "funding_extreme": [],
+        # 🚀 新增
+        "oi_spikes": [],
+        "oi_drops": [],
     }
 
 
@@ -61,6 +64,7 @@ def scan_market(all_results, hour_bjt: int = None):
         vol_spikes = []
         near_high, near_low = [], []
         funding_ext = []
+　　　　oi_spikes, oi_drops = [], []
 
         for r in all_results:
             if r.get("status") != "ok":
@@ -112,6 +116,14 @@ def scan_market(all_results, hour_bjt: int = None):
                 dist = (cp - rl) / rl * 100
                 if 0 <= dist <= NEAR_LOW_PCT:
                     near_low.append({"sym": sym, "dist": dist})
+
+        　　oi_1h = md.get("oi_change_pct_1h")
+　　　　　　
+　　　　　　if oi_1h is not None:
+          　　  if oi_1h >= 3.0:
+               　　 oi_spikes.append({"sym": sym, "pct": oi_1h})
+          　　  elif oi_1h <= -3.0:
+              　　  oi_drops.append({"sym": sym, "pct": oi_1h})
 
         # 排序 + 截断
         gainers.sort(key=lambda x: x["pct"], reverse=True)
