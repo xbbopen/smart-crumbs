@@ -19,6 +19,8 @@ FUNDING_EXTREME = 0.01      # 资金费率极端阈值（%）
 NEAR_HIGH_PCT = 3.0         # 距前高 3% 内视为"逼近"
 NEAR_LOW_PCT = 3.0          # 距前低 3% 内视为"逼近"
 TOP_N = 3                   # 每个榜单取 Top N
+OI_SPIKE_THRESHOLD = 3.0    # OI 1h 增幅超过 3% 视为骤增
+OI_DROP_THRESHOLD = -3.0    # OI 1h 降幅超过 3% 视为骤降
 
 
 def _empty_hotspot():
@@ -34,7 +36,7 @@ def _empty_hotspot():
         "near_highs": [],
         "near_lows": [],
         "funding_extreme": [],
-        # 🚀 新增
+        # 新增：OI 异动
         "oi_spikes": [],
         "oi_drops": [],
     }
@@ -48,7 +50,7 @@ def scan_market(all_results, hour_bjt: int = None):
     hotspot = _empty_hotspot()
     try:
         from datetime import datetime
-        from report_builder import BJT  # 复用时报时区
+        from report_builder import BJT  # 复用报告模块的时区
 
         if hour_bjt is None:
             hour_bjt = datetime.now(BJT).hour
@@ -64,7 +66,7 @@ def scan_market(all_results, hour_bjt: int = None):
         vol_spikes = []
         near_high, near_low = [], []
         funding_ext = []
-　　　　oi_spikes, oi_drops = [], []
+        oi_spikes, oi_drops = [], []
 
         for r in all_results:
             if r.get("status") != "ok":
@@ -104,6 +106,14 @@ def scan_market(all_results, hour_bjt: int = None):
             if fr is not None and abs(fr) >= FUNDING_EXTREME:
                 funding_ext.append({"sym": sym, "fr": fr})
 
+            # ---- OI 异动 ----
+            oi_1h = md.get("oi_change_pct_1h")
+            if oi_1h is not None:
+                if oi_1h >= OI_SPIKE_THRESHOLD:
+                    oi_spikes.append({"sym": sym, "pct": oi_1h})
+                elif oi_1h <= OI_DROP_THRESHOLD:
+                    oi_drops.append({"sym": sym, "pct": oi_1h})
+
             # ---- 逼近高低点 ----
             cp = md.get("current_price")
             rh = md.get("recent_high")
@@ -117,14 +127,6 @@ def scan_market(all_results, hour_bjt: int = None):
                 if 0 <= dist <= NEAR_LOW_PCT:
                     near_low.append({"sym": sym, "dist": dist})
 
-        　　oi_1h = md.get("oi_change_pct_1h")
-　　　　　　
-　　　　　　if oi_1h is not None:
-          　　  if oi_1h >= 3.0:
-               　　 oi_spikes.append({"sym": sym, "pct": oi_1h})
-          　　  elif oi_1h <= -3.0:
-              　　  oi_drops.append({"sym": sym, "pct": oi_1h})
-
         # 排序 + 截断
         gainers.sort(key=lambda x: x["pct"], reverse=True)
         losers.sort(key=lambda x: x["pct"])
@@ -137,8 +139,6 @@ def scan_market(all_results, hour_bjt: int = None):
         oi_spikes.sort(key=lambda x: x["pct"], reverse=True)
         oi_drops.sort(key=lambda x: x["pct"])
 
-        hotspot["oi_spikes"] = oi_spikes[:TOP_N]
-        hotspot["oi_drops"] = oi_drops[:TOP_N]
         hotspot["top_gainers"] = gainers[:TOP_N]
         hotspot["top_losers"] = losers[:TOP_N]
         hotspot["extreme_greed"] = greed[:TOP_N]
@@ -147,6 +147,8 @@ def scan_market(all_results, hour_bjt: int = None):
         hotspot["funding_extreme"] = funding_ext[:TOP_N]
         hotspot["near_highs"] = near_high[:TOP_N]
         hotspot["near_lows"] = near_low[:TOP_N]
+        hotspot["oi_spikes"] = oi_spikes[:TOP_N]
+        hotspot["oi_drops"] = oi_drops[:TOP_N]
 
     except Exception as e:
         log.error(f"[market_scanner] 扫描异常：{type(e).__name__}: {e}")
