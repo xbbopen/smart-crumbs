@@ -185,7 +185,7 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 stages.append({"weight": 40, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
             if ma10 and atr:
-                stop = ma10 - atr_mult * atr          # 修复：使用分层 ATR 倍数
+                stop = ma10 - atr_mult * atr
             elif rl and atr:
                 stop = rl - atr_mult * atr
             else:
@@ -195,6 +195,168 @@ class V1DefaultStrategy(BaseStrategy):
         total_weight = sum(s["weight"] for s in stages)
         avg_price = sum(s["price"] * s["weight"] for s in stages) / total_weight if total_weight > 0 else cp
         return {"stages": stages, "avg_price": avg_price, "stop": stop, "note": note}
+
+    # ================= 衍生品评分辅助 =================
+    def _score_track1_derivatives(self, md, price, tr):
+        """
+        轨道1 底部突破：新增 2 条衍生品评分。
+        返回 (得分, max_bonus)
+        """
+        score = 0
+        max_score = 0
+
+        # 7. OI 变化：1h 内 OI 增加 ≥1%（新多进场）
+        oi_1h = md.get("oi_change_pct_1h")
+        if oi_1h is not None:
+            max_score += 1
+            if oi_1h >= 1.0:
+                score += 1
+                tr["details"]["7.OI 1h增幅"] = f"✅ +{oi_1h:.2f}%（新多进场）"
+            else:
+                tr["details"]["7.OI 1h增幅"] = f"❌ {oi_1h:+.2f}%"
+        else:
+            tr["details"]["7.OI 1h增幅"] = "⚪ 数据不足"
+
+        # 8. VWAP 站上：机构成本线确认
+        vwap = md.get("vwap_30m")
+        if vwap and price:
+            max_score += 1
+            if price >= vwap:
+                score += 1
+                tr["details"]["8.站上VWAP"] = f"✅ 现价{price:.4f} ≥ VWAP {vwap:.4f}"
+            else:
+                tr["details"]["8.站上VWAP"] = f"❌ 现价{price:.4f} < VWAP {vwap:.4f}"
+        else:
+            tr["details"]["8.站上VWAP"] = "⚪ 数据不足"
+
+        return score, max_score
+
+    def _score_track2a_derivatives(self, md, price, tr):
+        """
+        轨道2A 见顶做空：新增 2 条衍生品评分。
+        """
+        score = 0
+        max_score = 0
+
+        # 7. OI 减少（价涨 OI 减 = 空头回补，顶部特征）
+        oi_1h = md.get("oi_change_pct_1h")
+        if oi_1h is not None:
+            max_score += 1
+            if oi_1h <= -0.5:
+                score += 1
+                tr["details"]["7.OI 1h减幅"] = f"✅ {oi_1h:.2f}%（空头回补，见顶特征）"
+            else:
+                tr["details"]["7.OI 1h减幅"] = f"❌ {oi_1h:+.2f}%"
+        else:
+            tr["details"]["7.OI 1h减幅"] = "⚪ 数据不足"
+
+        # 8. 基差过热 或 远离 VWAP
+        basis = md.get("basis_pct")
+        vwap = md.get("vwap_30m")
+        hit = False
+        reason = []
+        if basis is not None:
+            max_score += 1
+            if basis >= 0.05:
+                hit = True
+                reason.append(f"基差{basis:+.3f}%过热")
+        if vwap and price:
+            if max_score == 0:
+                max_score += 1
+            if price > vwap * 1.03:
+                hit = True
+                reason.append(f"高于VWAP{(price/vwap-1)*100:.1f}%")
+        if max_score > 0:
+            if hit:
+                score += 1
+                tr["details"]["8.基差/VWAP过热"] = f"✅ {' | '.join(reason)}"
+            else:
+                tr["details"]["8.基差/VWAP过热"] = "❌ 未见明显过热"
+        else:
+            tr["details"]["8.基差/VWAP过热"] = "⚪ 数据不足"
+
+        return score, max_score
+
+    def _score_track3_derivatives(self, md, price, tr):
+        """
+        轨道3 暴跌反弹：新增 2 条衍生品评分。
+        """
+        score = 0
+        max_score = 0
+
+        # 7. OI 骤降（清算特征）或费率极端负
+        oi_1h = md.get("oi_change_pct_1h")
+        fr = md.get("funding_rate")
+        hit = False
+        reason = []
+        if oi_1h is not None:
+            max_score += 1
+            if oi_1h <= -3.0:
+                hit = True
+                reason.append(f"OI骤降{oi_1h:.2f}%（清算特征）")
+        if fr is not None:
+            if max_score == 0:
+                max_score += 1
+            if fr <= -0.01:
+                hit = True
+                reason.append(f"费率{fr:.4f}%极端负")
+        if max_score > 0:
+            if hit:
+                score += 1
+                tr["details"]["7.OI骤降/费率极端"] = f"✅ {' | '.join(reason)}"
+            else:
+                tr["details"]["7.OI骤降/费率极端"] = "❌ 未出现极端"
+        else:
+            tr["details"]["7.OI骤降/费率极端"] = "⚪ 数据不足"
+
+        # 8. 价格远低于 VWAP（超卖）
+        vwap = md.get("vwap_30m")
+        if vwap and price:
+            max_score += 1
+            dev = (price - vwap) / vwap * 100
+            if dev <= -3.0:
+                score += 1
+                tr["details"]["8.远离VWAP超卖"] = f"✅ 低于VWAP {dev:.2f}%"
+            else:
+                tr["details"]["8.远离VWAP超卖"] = f"❌ 偏离VWAP {dev:+.2f}%"
+        else:
+            tr["details"]["8.远离VWAP超卖"] = "⚪ 数据不足"
+
+        return score, max_score
+
+    def _score_track4_derivatives(self, md, price, tr):
+        """
+        轨道4 趋势回踩：新增 2 条衍生品评分。
+        """
+        score = 0
+        max_score = 0
+
+        # 7. VWAP 支撑：价格接近 VWAP（-1% ~ +2%）
+        vwap = md.get("vwap_30m")
+        if vwap and price:
+            max_score += 1
+            dev = (price - vwap) / vwap * 100
+            if -1.0 <= dev <= 2.0:
+                score += 1
+                tr["details"]["7.VWAP支撑"] = f"✅ 距VWAP {dev:+.2f}%"
+            else:
+                tr["details"]["7.VWAP支撑"] = f"❌ 偏离VWAP {dev:+.2f}%"
+        else:
+            tr["details"]["7.VWAP支撑"] = "⚪ 数据不足"
+
+        # 8. OI 稳定或略增（-1% ~ +3%）
+        oi_4h = md.get("oi_change_pct_4h")
+        if oi_4h is not None:
+            max_score += 1
+            if -1.0 <= oi_4h <= 3.0:
+                score += 1
+                tr["details"]["8.OI稳定"] = f"✅ 4h {oi_4h:+.2f}%"
+            else:
+                tr["details"]["8.OI稳定"] = f"❌ 4h {oi_4h:+.2f}%（异动）"
+        else:
+            tr["details"]["8.OI稳定"] = "⚪ 数据不足"
+
+        return score, max_score
 
     # ================= 主评估 =================
     def evaluate(self, symbol, asset_type, market_data):
@@ -320,13 +482,17 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_1"]["details"]["6.4H MACD金叉"] = "❌ 4H MACD未金叉"
 
+            # 🚀 衍生品评分
+            d_score, d_max = self._score_track1_derivatives(market_data, price, result["track_1"])
+            result["track_1"]["score"] += d_score
+            result["track_1"]["max"] = 6 + d_max
+
         # ================= 轨道2：做空 =================
         if not result["track_2"]["allowed"]:
             result["track_2"]["details"]["❌ 状态禁止"] = f"当前状态【{regime_cn(regime)}】禁止做空"
         else:
             if momentum_4h in ("bull", "strong_bull"):
                 result["track_2"]["details"]["硬条件"] = "❌ 4H动能向上，禁止做空"
-            # 修复：删除原先对 weak_bull + neutral 的额外阻止，状态机已允许做空
             elif not adx_ok_trend_2:
                 adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
                 result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 20"
@@ -338,6 +504,7 @@ class V1DefaultStrategy(BaseStrategy):
 
                 result["track_2"]["details"]["──────── 📌 见顶做空（反转）────────"] = ""
                 rev_score = 0
+                rev_max = 6
 
                 if price >= rh * 0.97:
                     rev_score += 1
@@ -393,11 +560,17 @@ class V1DefaultStrategy(BaseStrategy):
                 else:
                     result["track_2"]["details"]["A6.4H MACD死叉"] = "❌ 4H MACD未死叉"
 
-                result["track_2"]["details"]["📊 见顶做空得分"] = f"{rev_score}/6"
+                # 🚀 见顶做空衍生品评分
+                d_score_2a, d_max_2a = self._score_track2a_derivatives(market_data, price, result["track_2"])
+                rev_score += d_score_2a
+                rev_max = 6 + d_max_2a
+
+                result["track_2"]["details"]["📊 见顶做空得分"] = f"{rev_score}/{rev_max}"
 
                 result["track_2"]["details"]["──────── 📉 顺势做空（趋势延续）────────"] = ""
                 tf_core = 0
                 tf_aux = 0
+                tf_aux_max = 4
 
                 if ema20_4h and ema50_4h and ema20_4h < ema50_4h:
                     tf_core += 1
@@ -450,17 +623,43 @@ class V1DefaultStrategy(BaseStrategy):
                 else:
                     result["track_2"]["details"]["B6.30m RSI未超买"] = f"❌ RSI={rsi_str}"
 
-                result["track_2"]["details"]["📊 顺势做空核心"] = f"{tf_core}/2"
-                result["track_2"]["details"]["📊 顺势做空辅助"] = f"{tf_aux}/4"
+                # 🚀 顺势做空新增辅助：B7 OI 增 或 B8 VWAP 遇阻
+                oi_1h = market_data.get("oi_change_pct_1h")
+                if oi_1h is not None:
+                    tf_aux_max += 1
+                    if oi_1h >= 0.5:
+                        tf_aux += 1
+                        result["track_2"]["details"]["B7.OI 1h增加"] = f"✅ {oi_1h:+.2f}%（空头加仓）"
+                    else:
+                        result["track_2"]["details"]["B7.OI 1h增加"] = f"❌ {oi_1h:+.2f}%"
+                else:
+                    result["track_2"]["details"]["B7.OI 1h增加"] = "⚪ 数据不足"
 
-                if rev_score >= 4:
+                vwap = market_data.get("vwap_30m")
+                if vwap and price:
+                    tf_aux_max += 1
+                    dist_vwap = (price - vwap) / vwap
+                    if -0.005 <= dist_vwap <= 0.03:
+                        tf_aux += 1
+                        result["track_2"]["details"]["B8.VWAP遇阻"] = f"✅ 距VWAP {dist_vwap*100:+.2f}%"
+                    else:
+                        result["track_2"]["details"]["B8.VWAP遇阻"] = f"❌ 偏离VWAP {dist_vwap*100:+.2f}%"
+                else:
+                    result["track_2"]["details"]["B8.VWAP遇阻"] = "⚪ 数据不足"
+
+                result["track_2"]["details"]["📊 顺势做空核心"] = f"{tf_core}/2"
+                result["track_2"]["details"]["📊 顺势做空辅助"] = f"{tf_aux}/{tf_aux_max}"
+
+                if rev_score >= 5:
                     result["track_2"]["sub_type"] = "reversal"
                     result["track_2"]["score"] = rev_score
-                    result["track_2"]["reason"] = f"见顶做空 {rev_score}/6"
-                elif tf_core >= 2 and tf_aux >= 2:
+                    result["track_2"]["max"] = rev_max
+                    result["track_2"]["reason"] = f"见顶做空 {rev_score}/{rev_max}"
+                elif tf_core >= 2 and tf_aux >= 3:
                     result["track_2"]["sub_type"] = "trend_follow"
                     result["track_2"]["score"] = tf_core + tf_aux
-                    result["track_2"]["reason"] = f"顺势做空 核心{tf_core}/2 + 辅助{tf_aux}/4"
+                    result["track_2"]["max"] = 2 + tf_aux_max
+                    result["track_2"]["reason"] = f"顺势做空 核心{tf_core}/2 + 辅助{tf_aux}/{tf_aux_max}"
 
         # ================= 轨道3：暴跌反弹做多 =================
         if not result["track_3"]["allowed"]:
@@ -486,6 +685,7 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_3"]["hard_ok"] = True
                 result["track_3"]["details"]["硬条件"] = f"✅ 4H下跌但已极端超卖，短线反弹机会"
                 result["track_3"]["score"] = 6
+                result["track_3"]["max"] = 6
         else:
             result["track_3"]["hard_ok"] = True
             result["track_3"]["details"]["硬条件"] = f"✅ 1D={trend_cn(trend_1d)} + ADX≥12"
@@ -540,6 +740,11 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_3"]["details"]["6.30m止跌形态"] = "❌ 未见止跌形态"
                 else:
                     result["track_3"]["details"]["6.30m止跌形态"] = "❌ 数据不足"
+
+                # 🚀 暴跌反弹衍生品评分
+                d_score_3, d_max_3 = self._score_track3_derivatives(market_data, price, result["track_3"])
+                result["track_3"]["score"] += d_score_3
+                result["track_3"]["max"] = 6 + d_max_3
 
         # ================= 轨道4：趋势回踩做多 =================
         if not result["track_4"]["allowed"]:
@@ -610,20 +815,45 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_4"]["details"]["6.4H MACD健康"] = "❌ 4H MACD已死叉"
 
+            # 🚀 趋势回踩衍生品评分
+            d_score_4, d_max_4 = self._score_track4_derivatives(market_data, price, result["track_4"])
+            result["track_4"]["score"] += d_score_4
+            result["track_4"]["max"] = 6 + d_max_4
+
         # ================= 最终裁决 =================
         candidates = []
 
+        # 轨道2：使用动态阈值
         if result["track_2"]["hard_ok"] and result["track_2"].get("sub_type"):
-            candidates.append(("short", "track_2", result["track_2"]["score"], result["track_2"]["reason"]))
+            t2_max = result["track_2"].get("max", 6)
+            t2_score = result["track_2"]["score"]
+            threshold_2 = 5 if t2_max >= 8 else 4
+            if t2_score >= threshold_2:
+                candidates.append(("short", "track_2", t2_score, result["track_2"]["reason"]))
 
-        if result["track_4"]["hard_ok"] and result["track_4"]["score"] >= 4:
-            candidates.append(("long_pullback", "track_4", result["track_4"]["score"], f"趋势回踩 {result['track_4']['score']}/6"))
+        # 轨道4：动态阈值
+        if result["track_4"]["hard_ok"]:
+            t4_max = result["track_4"].get("max", 6)
+            t4_score = result["track_4"]["score"]
+            threshold_4 = 5 if t4_max >= 8 else 4
+            if t4_score >= threshold_4:
+                candidates.append(("long_pullback", "track_4", t4_score, f"趋势回踩 {t4_score}/{t4_max}"))
 
-        if result["track_3"]["hard_ok"] and result["track_3"]["score"] >= 4:
-            candidates.append(("long_rebound", "track_3", result["track_3"]["score"], f"暴跌反弹 {result['track_3']['score']}/6"))
+        # 轨道3：动态阈值
+        if result["track_3"]["hard_ok"]:
+            t3_max = result["track_3"].get("max", 6)
+            t3_score = result["track_3"]["score"]
+            threshold_3 = 5 if t3_max >= 8 else 4
+            if t3_score >= threshold_3:
+                candidates.append(("long_rebound", "track_3", t3_score, f"暴跌反弹 {t3_score}/{t3_max}"))
 
-        if result["track_1"]["hard_ok"] and result["track_1"]["score"] >= 4:
-            candidates.append(("long_trend", "track_1", result["track_1"]["score"], f"底部突破 {result['track_1']['score']}/6"))
+        # 轨道1：动态阈值
+        if result["track_1"]["hard_ok"]:
+            t1_max = result["track_1"].get("max", 6)
+            t1_score = result["track_1"]["score"]
+            threshold_1 = 5 if t1_max >= 8 else 4
+            if t1_score >= threshold_1:
+                candidates.append(("long_trend", "track_1", t1_score, f"底部突破 {t1_score}/{t1_max}"))
 
         if candidates:
             priority_order = {"short": 4, "long_pullback": 3, "long_rebound": 2, "long_trend": 1}
