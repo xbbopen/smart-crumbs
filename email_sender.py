@@ -7,7 +7,8 @@
 2. 支持 Gmail 双端口降级：587 STARTTLS → 465 SSL。
 3. 针对不同异常给出明确提示（网络超时 / 535 认证 / 收件人被拒）。
 4. 密码自动去掉空格（Gmail 应用密码复制常见坑）。
-5. 失败时抛出异常，确保 GitHub Actions 明确标红。
+5. SMTP_PORT 增加容错，无效时回退 587。
+6. 失败时抛出异常，确保 GitHub Actions 明确标红。
 """
 import os
 import time
@@ -39,13 +40,11 @@ def _send_once(host: str, port: int, use_ssl: bool,
                msg: MIMEMultipart, timeout: int = 30) -> None:
     """单次尝试发送。失败抛异常，成功正常返回。"""
     if use_ssl:
-        # 465：直接 SSL 包装
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL(host, port, timeout=timeout, context=context) as server:
             server.login(user, password)
             server.sendmail(user, [recipient], msg.as_string())
     else:
-        # 587：先明文连接，再 STARTTLS 升级
         context = ssl.create_default_context()
         with smtplib.SMTP(host, port, timeout=timeout) as server:
             server.ehlo()
@@ -64,7 +63,11 @@ def send_html_email(subject: str, html: str, max_retries: int = 3) -> None:
       - 若遇 535 认证失败，直接终止重试（密码问题重试无用）。
     """
     smtp_server = _require_env("SMTP_SERVER")
-    smtp_port = int(_require_env("SMTP_PORT"))
+    smtp_port_str = _require_env("SMTP_PORT")
+    try:
+        smtp_port = int(smtp_port_str)
+    except ValueError:
+        smtp_port = 587          # 修复：无效端口回退默认值
     smtp_user = _require_env("SMTP_USERNAME")
     smtp_pass = _require_env("SMTP_PASSWORD").replace(" ", "")
     recipient = _require_env("RECIPIENT_EMAIL")
@@ -90,7 +93,6 @@ def send_html_email(subject: str, html: str, max_retries: int = 3) -> None:
                 print(f"[email] ✅ 发送成功 → {recipient}")
                 return
             except smtplib.SMTPAuthenticationError as e:
-                # 535 —— 密码错误，重试和换端口都没意义
                 print("[email] ❌ 认证失败（535）。")
                 print("[email] 原因：Gmail 主密码重置后，应用专用密码被自动撤销。")
                 print("[email] 解决：")
@@ -103,7 +105,6 @@ def send_html_email(subject: str, html: str, max_retries: int = 3) -> None:
                     smtplib.SMTPConnectError,
                     TimeoutError,
                     OSError) as e:
-                # 网络类错误 —— 换下一个端口 / 下一次重试
                 print(f"[email] ⚠️  {smtp_server}:{port} 网络异常：{e}")
                 last_error = e
                 continue
@@ -115,7 +116,6 @@ def send_html_email(subject: str, html: str, max_retries: int = 3) -> None:
                 last_error = e
                 continue
 
-        # 每轮重试之间等待，避免瞬间连打
         if attempt < max_retries:
             wait = 2 ** attempt
             print(f"[email] 本轮所有端口均失败，等待 {wait}s 后重试...")
