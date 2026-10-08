@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-回测引擎 v7 - 分层回测 + 现实模拟
+回测引擎 v8 - 分层回测 + 现实模拟
 
-v7 核心改动：
+v8 核心改动：
 1. 从 config.json 的 backtest_tiers 读分层标的，不再拉全市场
 2. 每笔交易扣滑点（按币种分层：核心 0.02% / 卫星 0.05% / 观察 0.10%）
 3. 做空持仓模拟资金费率收入，做多模拟资金费率成本（0.01% / 8h）
@@ -10,10 +10,13 @@ v7 核心改动：
 5. 新增"实盘预估收益"列（扣滑点+费率）
 6. 无冷却期（按用户要求）
 7. 仓位改为固定本金，消除复利偏差
-8. 强制行缓冲，GitHub Actions 实时输出
+8. manage_position 改用 K 线 high/low 判断止损/移动止盈，更贴近真实盘面
+9. 每个标的输出离场原因分布日志
+10. 强制行缓冲，GitHub Actions 实时输出
 """
 import json, time, argparse, os, math, sys
 import bisect
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 # 🚀 强制行缓冲，确保 GitHub Actions 实时看到输出
@@ -97,7 +100,7 @@ def build_market_data_from_slices(symbol, asset_type, window_30m, window_1h,
         "rsi_1h": None, "kdj_1h": None, "boll_1h": None, "macd_1h": None, "rsi_div_1h": None,
         "ema20_4h": None, "ema50_4h": None, "rsi_4h": None, "macd_4h": None, "trend_4h": None,
         "ema50_1d": None, "rsi_1d": None, "trend_1d": None,
-        # 🚀 衍生品字段（回测中通常为 None，走 6 分制降级）
+        # 衍生品字段（回测中通常为 None，走 6 分制降级）
         "vwap_30m": None,
         "basis_pct": None,
         "oi_change_pct_1h": None,
@@ -223,47 +226,87 @@ def evaluate_strategy(report):
     return "❌ D级", f"综合得分{score}。跑输基准"
 
 
-def manage_position(pos, cp, ma10, atr):
+def manage_position(pos, kline, ma10, atr):
+    """
+    用K线的 low/high 判断止损与移动止盈，避免用收盘价判断导致的高估。
+
+    逻辑：
+    1. 先判断硬止损（做多用 low，做空用 high）
+    2. 再用 high（做多）/ low（做空）判断移动止盈阶段是否升级
+    3. 移动止盈升级后，如果同一根 K 线已经触及新止损，则按新止损出场
+    4. 最后判断 MA10 离场（用 low/high 触发，用 MA10 价成交）
+
+    返回 (still_hold, exit_price, reason)
+    - still_hold=True 表示还在持仓
+    - 移动止盈阶段升级不算离场，只更新 pos["stop"] 和 pos["tp_stage"]
+
+    额外副作用：如果移动止盈升级，会设置 pos["_tp_upgraded"]=True 供统计使用
+    """
     direction = pos["direction"]
     entry = pos["entry"]
     stop = pos["stop"]
     tp_stage = pos["tp_stage"]
 
+    high = kline["high"]
+    low = kline["low"]
+
     if direction.startswith("long"):
-        if cp <= stop:
+        # 1. 硬止损（用最低价）
+        if low <= stop:
             return False, stop, "止损"
-        profit_atr = (cp - entry) / atr if atr and atr > 0 else 0
+
+        # 2. 移动止盈阶段升级（用最高价）
+        profit_atr = (high - entry) / atr if atr and atr > 0 else 0
+        old_stop = pos["stop"]
         if tp_stage < 1 and profit_atr >= 1.0:
             pos["stop"] = entry
             pos["tp_stage"] = 1
+            pos["_tp_upgraded"] = True
         elif tp_stage < 2 and profit_atr >= 2.0:
             pos["stop"] = entry + 1.0 * atr
             pos["tp_stage"] = 2
+            pos["_tp_upgraded"] = True
         elif tp_stage < 3 and profit_atr >= 3.0:
             pos["stop"] = entry + 2.0 * atr
             pos["tp_stage"] = 3
-        # 更新止损后再次检查，确保同一根 K 线内触发
-        if cp <= pos["stop"]:
-            return False, pos["stop"], "止损"
-        if ma10 and cp < ma10:
-            return False, cp, "MA10跌破"
+            pos["_tp_upgraded"] = True
+
+        # 3. 移动止盈升级后，同一根K线若已跌破新止损，按新止损出场
+        if pos["stop"] > old_stop and low <= pos["stop"]:
+            return False, pos["stop"], "移动止盈回落"
+
+        # 4. MA10 离场（用最低价触发，用 MA10 价成交）
+        if ma10 and low < ma10:
+            return False, ma10, "MA10跌破"
     else:
-        if cp >= stop:
+        # 做空
+        # 1. 硬止损（用最高价）
+        if high >= stop:
             return False, stop, "止损"
-        profit_atr = (entry - cp) / atr if atr and atr > 0 else 0
+
+        # 2. 移动止盈阶段升级（用最低价）
+        profit_atr = (entry - low) / atr if atr and atr > 0 else 0
+        old_stop = pos["stop"]
         if tp_stage < 1 and profit_atr >= 1.0:
             pos["stop"] = entry
             pos["tp_stage"] = 1
+            pos["_tp_upgraded"] = True
         elif tp_stage < 2 and profit_atr >= 2.0:
             pos["stop"] = entry - 1.0 * atr
             pos["tp_stage"] = 2
+            pos["_tp_upgraded"] = True
         elif tp_stage < 3 and profit_atr >= 3.0:
             pos["stop"] = entry - 2.0 * atr
             pos["tp_stage"] = 3
-        if cp >= pos["stop"]:
-            return False, pos["stop"], "止损"
-        if ma10 and cp > ma10:
-            return False, cp, "MA10突破"
+            pos["_tp_upgraded"] = True
+
+        # 3. 移动止盈升级后，同一根K线若已突破新止损，按新止损出场
+        if pos["stop"] < old_stop and high >= pos["stop"]:
+            return False, pos["stop"], "移动止盈回落"
+
+        # 4. MA10 离场（用最高价触发，用 MA10 价成交）
+        if ma10 and high > ma10:
+            return False, ma10, "MA10突破"
 
     return True, None, None
 
@@ -332,6 +375,10 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     current_cap_theoretical = capital
     current_cap_real = capital
 
+    # 离场原因统计
+    exit_reasons = Counter()
+    tp_upgrade_count = 0
+
     for i in range(start_idx, end_idx + 1):
         current_ts = ts_30m[i]
         window_30m = klines_30m[:i + 1]
@@ -351,9 +398,15 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         atr = md["atr"]
         ma10 = md["ma10"]
 
-        # ---------- 平仓处理 ----------
+        # ---------- 平仓处理（用整根K线） ----------
         if position is not None:
-            still_hold, exit_price, reason = manage_position(pos_info, cp, ma10, atr)
+            current_kline = klines_30m[i]
+            # 每次检查前重置升级标记
+            pos_info["_tp_upgraded"] = False
+            still_hold, exit_price, reason = manage_position(pos_info, current_kline, ma10, atr)
+            if pos_info.get("_tp_upgraded"):
+                tp_upgrade_count += 1
+
             if not still_hold:
                 entry = pos_info["entry"]
                 direction = pos_info["direction"]
@@ -385,6 +438,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 
                 margin_10x = position_value / LEVERAGE
                 coin_amount = position_value / entry if entry else 0
+
+                exit_reasons[reason] += 1
 
                 trades.append({
                     "entry_idx": pos_info["entry_idx"], "exit_idx": i,
@@ -429,6 +484,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                         "original_stop": stop_price,
                         "tp_stage": 0,
                         "entry_idx": i,
+                        "_tp_upgraded": False,
                     }
 
     # ---------- 末尾强制平仓 ----------
@@ -457,6 +513,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         margin_10x = position_value / LEVERAGE
         coin_amount = position_value / entry if entry else 0
 
+        exit_reasons["末尾平仓"] += 1
+
         trades.append({
             "entry_idx": pos_info["entry_idx"], "exit_idx": end_idx,
             "direction": direction,
@@ -477,6 +535,9 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "stop_price": pos_info["original_stop"],
             "risk_pct": risk_pct * 100,
         })
+
+    # ---------- 离场原因分布日志 ----------
+    _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count, start_idx, end_idx)
 
     # ---------- 统计 ----------
     total = len(trades)
@@ -504,6 +565,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "backtest_end_ms": backtest_end_ms,
             "slippage_rate": slippage_rate,
             "trades": [],
+            "exit_reasons": dict(exit_reasons),
+            "tp_upgrade_count": tp_upgrade_count,
         }
 
     # 理论统计
@@ -577,6 +640,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         "backtest_end_ms": backtest_end_ms,
         "slippage_rate": slippage_rate,
         "trades": trades,
+        "exit_reasons": dict(exit_reasons),
+        "tp_upgrade_count": tp_upgrade_count,
     }
 
     rating, rating_desc = evaluate_strategy(report)
@@ -587,6 +652,38 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
           f"理论{total_return:.2f}% → 实盘{total_return_real:.2f}% | "
           f"基准{buy_hold:.2f}% | {rating}", flush=True)
     return report
+
+
+def _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count, start_idx, end_idx):
+    """
+    打印本标的的离场原因分布，方便诊断止损结构。
+    """
+    total = len(trades)
+    bars_total = end_idx - start_idx + 1
+
+    print(f"   📊 离场原因分布（{symbol}）：", flush=True)
+    if total == 0:
+        print(f"      （本区间无交易）", flush=True)
+        return
+
+    # 固定顺序展示
+    order = ["止损", "移动止盈回落", "MA10跌破", "MA10突破", "末尾平仓"]
+    for k in order:
+        cnt = exit_reasons.get(k, 0)
+        if cnt == 0:
+            continue
+        pct = cnt / total * 100
+        bar = "█" * int(pct / 5)  # 每 5% 一个方块
+        print(f"      {k:<10} {cnt:>4} 笔 ({pct:>5.1f}%) {bar}", flush=True)
+
+    # 其它未列出的原因
+    for k, cnt in exit_reasons.items():
+        if k not in order and cnt > 0:
+            pct = cnt / total * 100
+            print(f"      {k:<10} {cnt:>4} 笔 ({pct:>5.1f}%)", flush=True)
+
+    print(f"      —— 移动止盈升级次数：{tp_upgrade_count} 次（不含未升级到下一阶段的重复计数）", flush=True)
+    print(f"      —— 平均持仓：{sum(t['bars_held'] for t in trades) / total:.1f} 根 30m", flush=True)
 
 
 # ============================================================
@@ -700,8 +797,8 @@ def _render_trades_cards(trades, show_real=True):
         "💡 <b>时间</b>：北京时间（BJT, UTC+8）<br>"
         "💡 <b>理论盈亏</b>：扣开仓+平仓双边手续费<br>"
         "💡 <b>实盘预估</b>：再扣滑点 + 资金费率（做空收取，做多支付）<br>"
-        "💡 <b>离场原因</b>：<b>止损</b>=触及硬止损｜<b>MA10跌破/突破</b>=动态离场｜"
-        "<b>末尾平仓</b>=区间结束时强制平仓"
+        "💡 <b>离场原因</b>：<b>止损</b>=触及硬止损｜<b>移动止盈回落</b>=移动止盈升级后同一根K线回落触发｜"
+        "<b>MA10跌破/突破</b>=动态离场｜<b>末尾平仓</b>=区间结束时强制平仓"
         "</p>"
     )
     return html
@@ -726,15 +823,15 @@ def _render_consistency_notice(fee, capital):
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">硬止损</td>
-            <td style="padding:6px 8px;">✅ 按币种分层 ATR 倍数（1.5× / 2.0× / 2.5×）</td>
+            <td style="padding:6px 8px;">✅ 按币种分层 ATR 倍数（1.5× / 2.0× / 2.5×），用K线最低/最高价触发</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">移动止盈</td>
-            <td style="padding:6px 8px;">✅ 1×ATR 保本 → 2×ATR 上移 → 3×ATR 继续上移</td>
+            <td style="padding:6px 8px;">✅ 1×ATR 保本 → 2×ATR 上移 → 3×ATR 继续上移；同一根K线回落即出场</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">MA10 离场</td>
-            <td style="padding:6px 8px;">✅ 价格跌破/突破 MA10 立即离场</td>
+            <td style="padding:6px 8px;">✅ 价格盘中跌破/突破 MA10 即离场（按 MA10 价成交）</td>
         </tr>
         <tr>
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">仓位基数</td>
@@ -811,6 +908,26 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
         html += f"<span style='color:#c0392b;'>🔴 做空：<b>{r['short_trades']}</b> 笔（{r['short_win_rate']}%）</span>"
         html += f" &nbsp;|&nbsp; <span style='color:#666;'>平均持仓 <b>{r['avg_bars_held']}</b> 根30m</span>"
         html += "</div>"
+
+        # 离场原因分布
+        er = r.get("exit_reasons") or {}
+        if er:
+            total_e = sum(er.values())
+            html += "<div style='background:#fff8e1; padding:12px; border-radius:8px; font-size:12.5px; margin-bottom:15px; border-left:4px solid #f39c12;'>"
+            html += "<b>🚪 离场原因分布：</b><br>"
+            for k in ["止损", "移动止盈回落", "MA10跌破", "MA10突破", "末尾平仓"]:
+                cnt = er.get(k, 0)
+                if cnt == 0:
+                    continue
+                pct = cnt / total_e * 100 if total_e else 0
+                html += f"&nbsp;&nbsp;· {k}：<b>{cnt}</b> 笔（{pct:.1f}%）<br>"
+            for k, cnt in er.items():
+                if k not in ["止损", "移动止盈回落", "MA10跌破", "MA10突破", "末尾平仓"] and cnt > 0:
+                    pct = cnt / total_e * 100 if total_e else 0
+                    html += f"&nbsp;&nbsp;· {k}：<b>{cnt}</b> 笔（{pct:.1f}%）<br>"
+            tp_up = r.get("tp_upgrade_count", 0)
+            html += f"&nbsp;&nbsp;· 移动止盈升级次数：<b>{tp_up}</b><br>"
+            html += "</div>"
 
         html += "<h4 style='margin:20px 0 12px 0; color:#2c3e50; font-size:15px;'>📝 交易明细（共 {} 笔）</h4>".format(r["total_trades"])
         html += _render_trades_cards(r["trades"], show_real=True)
@@ -964,7 +1081,7 @@ def main():
     symbol_list, tier_map = resolve_backtest_symbols(cfg, cli_symbols)
 
     print(f"\n{'='*70}", flush=True)
-    print(f"📊 参谋长分层回测引擎 v7", flush=True)
+    print(f"📊 参谋长分层回测引擎 v8", flush=True)
     print(f"   策略：{strategies}", flush=True)
     print(f"   标的数：{len(symbol_list)}", flush=True)
     tier_count = {"core": 0, "satellite": 0, "watch": 0}
