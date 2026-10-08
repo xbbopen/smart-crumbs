@@ -7,7 +7,7 @@
     { "symbol": "SOL_USDT", "type": "futures" },
     { "symbol": "QNT_USDT", "type": "futures" },
     { "symbol": "ZEC_USDT", "type": "futures" },
-    { "symbol": "XRP_USDT", "type": "futures" },
+    { "symbol": "MET_USDT", "type": "futures" },
     { "symbol": "NEAR_USDT", "type": "futures" },
     { "symbol": "SUI_USDT", "type": "futures" },
     { "symbol": "DOGE_USDT", "type": "futures" },
@@ -17,13 +17,14 @@
     { "symbol": "BTW_USDT", "type": "futures" },
     { "symbol": "PUMP_USDT", "type": "futures" },
     { "symbol": "ONDO_USDT", "type": "futures" },
-    { "symbol": "SOON_USDT", "type": "futures" },
+    { "symbol": "RLC_USDT", "type": "futures" },
     { "symbol": "AVAX_USDT", "type": "futures" },
     { "symbol": "LINK_USDT", "type": "futures" },
     { "symbol": "ARB_USDT", "type": "futures" },
     { "symbol": "ADA_USDT", "type": "futures" },
     { "symbol": "PENGU_USDT", "type": "futures" },
-    { "symbol": "FIL_USDT", "type": "futures" }
+    { "symbol": "FIL_USDT", "type": "futures" },
+    { "symbol": "ORCA_USDT", "type": "futures" }
   ],
 
   "backtest_tiers": {
