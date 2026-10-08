@@ -51,13 +51,14 @@ jobs:
 
       - name: 运行回测
         run: |
-          python backtest.py \
+          python -u backtest.py \
             --strategies ${{ github.event.inputs.strategies }} \
             --symbols ${{ github.event.inputs.symbols }} \
             --start_date "${{ github.event.inputs.start_date }}" \
             --end_date "${{ github.event.inputs.end_date }}" \
             --asset_type ${{ github.event.inputs.asset_type }}
         env:
+          PYTHONUNBUFFERED: 1
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
