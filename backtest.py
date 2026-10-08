@@ -5,10 +5,11 @@
 v7 核心改动：
 1. 从 config.json 的 backtest_tiers 读分层标的，不再拉全市场
 2. 每笔交易扣滑点（按币种分层：核心 0.02% / 卫星 0.05% / 观察 0.10%）
-3. 做空持仓模拟资金费率成本（0.01% / 8h）
+3. 做空持仓模拟资金费率收入，做多模拟资金费率成本（0.01% / 8h）
 4. 报告分三层展示：核心池 / 卫星池 / 观察池
 5. 新增"实盘预估收益"列（扣滑点+费率）
 6. 无冷却期（按用户要求）
+7. 仓位改为固定本金，消除复利偏差
 """
 import json, time, argparse, os, math, sys
 import bisect
@@ -37,7 +38,7 @@ SLIPPAGE_BY_TIER = {
     "watch": 0.0010,
 }
 
-# 资金费率：每 8 小时假设成本 0.01%（仅对做空扣）
+# 资金费率：每 8 小时假设成本/收入 0.01%
 FUNDING_PER_8H = 0.0001
 
 TIER_CN = {"core": "核心池", "satellite": "卫星池", "watch": "观察池"}
@@ -50,11 +51,12 @@ TIER_COLOR = {"core": "#27ae60", "satellite": "#3498db", "watch": "#9b59b6"}
 # 工具函数
 # ============================================================
 def parse_date(d):
-    if not d: return None
+    if not d:
+        return None
     try:
         dt = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         return int(dt.timestamp() * 1000)
-    except:
+    except Exception:
         return None
 
 
@@ -72,7 +74,7 @@ def fmt_ts_short(ts_ms):
 
 
 def build_market_data_from_slices(symbol, asset_type, window_30m, window_1h,
-                                   window_4h, window_1d, data_mode, data_source):
+                                  window_4h, window_1d, data_mode, data_source):
     md = {
         "symbol": symbol, "asset_type": asset_type, "fetch_status": "ok",
         "data_mode": data_mode, "data_source": data_source,
@@ -162,29 +164,48 @@ def evaluate_strategy(report):
         return "⚠️ 样本不足", "交易次数少于5次，不具参考性"
 
     score = 0
-    if excess > 20: score += 40
-    elif excess > 10: score += 30
-    elif excess > 0: score += 20
-    elif excess > -10: score += 10
+    if excess > 20:
+        score += 40
+    elif excess > 10:
+        score += 30
+    elif excess > 0:
+        score += 20
+    elif excess > -10:
+        score += 10
 
-    if sharpe > 1.5: score += 30
-    elif sharpe > 1.0: score += 25
-    elif sharpe > 0.5: score += 15
-    elif sharpe > 0: score += 5
+    if sharpe > 1.5:
+        score += 30
+    elif sharpe > 1.0:
+        score += 25
+    elif sharpe > 0.5:
+        score += 15
+    elif sharpe > 0:
+        score += 5
 
-    if dd < 10: score += 20
-    elif dd < 20: score += 15
-    elif dd < 30: score += 10
-    else: score += 5
+    if dd < 10:
+        score += 20
+    elif dd < 20:
+        score += 15
+    elif dd < 30:
+        score += 10
+    else:
+        score += 5
 
-    if report["profit_factor"] > 2.0: score += 10
-    elif report["profit_factor"] > 1.5: score += 7
-    elif report["profit_factor"] > 1.0: score += 3
+    if report["profit_factor"] > 2.0:
+        score += 10
+    elif report["profit_factor"] > 1.5:
+        score += 7
+    elif report["profit_factor"] > 1.0:
+        score += 3
 
-    if score >= 85: return "🏆 S级", f"综合得分{score}。极强的盈利能力和风控"
-    if score >= 70: return "🥇 A级", f"综合得分{score}。稳定跑赢基准"
-    if score >= 55: return "🥈 B级", f"综合得分{score}。小幅跑赢基准"
-    if score >= 40: return "🥉 C级", f"综合得分{score}。勉强跑平"
+    if score >= 85:
+        return "🏆 S级", f"综合得分{score}。极强的盈利能力和风控"
+    if score >= 70:
+        return "🥇 A级", f"综合得分{score}。稳定跑赢基准"
+    if score >= 55:
+        return "🥈 B级", f"综合得分{score}。小幅跑赢基准"
+    if score >= 40:
+        return "🥉 C级", f"综合得分{score}。勉强跑平"
     return "❌ D级", f"综合得分{score}。跑输基准"
 
 
@@ -199,11 +220,17 @@ def manage_position(pos, cp, ma10, atr):
             return False, stop, "止损"
         profit_atr = (cp - entry) / atr if atr and atr > 0 else 0
         if tp_stage < 1 and profit_atr >= 1.0:
-            pos["stop"] = entry; pos["tp_stage"] = 1
+            pos["stop"] = entry
+            pos["tp_stage"] = 1
         elif tp_stage < 2 and profit_atr >= 2.0:
-            pos["stop"] = entry + 1.0 * atr; pos["tp_stage"] = 2
+            pos["stop"] = entry + 1.0 * atr
+            pos["tp_stage"] = 2
         elif tp_stage < 3 and profit_atr >= 3.0:
-            pos["stop"] = entry + 2.0 * atr; pos["tp_stage"] = 3
+            pos["stop"] = entry + 2.0 * atr
+            pos["tp_stage"] = 3
+        # 更新止损后再次检查，确保同一根 K 线内触发
+        if cp <= pos["stop"]:
+            return False, pos["stop"], "止损"
         if ma10 and cp < ma10:
             return False, cp, "MA10跌破"
     else:
@@ -211,11 +238,16 @@ def manage_position(pos, cp, ma10, atr):
             return False, stop, "止损"
         profit_atr = (entry - cp) / atr if atr and atr > 0 else 0
         if tp_stage < 1 and profit_atr >= 1.0:
-            pos["stop"] = entry; pos["tp_stage"] = 1
+            pos["stop"] = entry
+            pos["tp_stage"] = 1
         elif tp_stage < 2 and profit_atr >= 2.0:
-            pos["stop"] = entry - 1.0 * atr; pos["tp_stage"] = 2
+            pos["stop"] = entry - 1.0 * atr
+            pos["tp_stage"] = 2
         elif tp_stage < 3 and profit_atr >= 3.0:
-            pos["stop"] = entry - 2.0 * atr; pos["tp_stage"] = 3
+            pos["stop"] = entry - 2.0 * atr
+            pos["tp_stage"] = 3
+        if cp >= pos["stop"]:
+            return False, pos["stop"], "止损"
         if ma10 and cp > ma10:
             return False, cp, "MA10突破"
 
@@ -274,7 +306,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     backtest_end_ms = ts_30m[end_idx]
     print(f"   数据源：{info_30m['actual']} | 30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根")
     print(f"   回放区间：{fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}")
-    print(f"   滑点：{slippage_rate*100:.3f}% / 费率：{FUNDING_PER_8H*100:.3f}%/8h（仅做空）")
+    print(f"   滑点：{slippage_rate*100:.3f}% / 费率：{FUNDING_PER_8H*100:.3f}%/8h（做空收入，做多成本）")
 
     strategy = load_strategy(strategy_name)
     data_mode = "futures" if info_30m["primary"] == "hyperliquid" else "spot"
@@ -288,7 +320,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 
     for i in range(start_idx, end_idx + 1):
         current_ts = ts_30m[i]
-        window_30m = klines_30m[:i+1]
+        window_30m = klines_30m[:i + 1]
 
         j1h = bisect.bisect_right(ts_1h, current_ts)
         j4h = bisect.bisect_right(ts_4h, current_ts)
@@ -314,7 +346,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 pnl_pct = (exit_price - entry) / entry if direction.startswith("long") else (entry - exit_price) / entry
 
                 risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
-                position_value = min(current_cap_theoretical * 0.5, current_cap_theoretical * 0.02 / risk_pct) if risk_pct > 0 else current_cap_theoretical * 0.5
+                # 修复：使用固定本金计算仓位，消除复利偏差
+                position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
 
                 # 理论盈亏（扣手续费）
                 fee_cost = position_value * fee * 2
@@ -323,16 +356,15 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 # 现实模拟：滑点
                 slippage_cost = position_value * slippage_rate * 2
 
-                # 现实模拟：资金费率（仅做空扣）
+                # 现实模拟：资金费率（做空收取，做多支付）
                 holding_bars = i - pos_info["entry_idx"]
                 holding_hours = holding_bars * 0.5
                 settlements = holding_hours / 8
                 if direction == "short":
-                    funding_cost = position_value * FUNDING_PER_8H * settlements
+                    funding_usd = -position_value * FUNDING_PER_8H * settlements  # 收入，负成本
                 else:
-                    funding_cost = 0.0
-
-                pnl_real = pnl_theoretical - slippage_cost - funding_cost
+                    funding_usd = position_value * FUNDING_PER_8H * settlements   # 成本，正支出
+                pnl_real = pnl_theoretical - slippage_cost - funding_usd
 
                 current_cap_theoretical += pnl_theoretical
                 current_cap_real += pnl_real
@@ -350,7 +382,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                     "pnl_usd": pnl_theoretical,
                     "pnl_usd_real": pnl_real,
                     "slippage_usd": slippage_cost,
-                    "funding_usd": funding_cost,
+                    "funding_usd": funding_usd,
                     "fee_usd": fee_cost,
                     "bars_held": holding_bars,
                     "exit_reason": reason,
@@ -392,7 +424,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         direction = pos_info["direction"]
         pnl_pct = (cp - entry) / entry if direction.startswith("long") else (entry - cp) / entry
         risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
-        position_value = min(current_cap_theoretical * 0.5, current_cap_theoretical * 0.02 / risk_pct) if risk_pct > 0 else current_cap_theoretical * 0.5
+        # 修复：固定本金
+        position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
 
         fee_cost = position_value * fee * 2
         pnl_theoretical = position_value * pnl_pct - fee_cost
@@ -400,8 +433,11 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         holding_bars = end_idx - pos_info["entry_idx"]
         holding_hours = holding_bars * 0.5
         settlements = holding_hours / 8
-        funding_cost = position_value * FUNDING_PER_8H * settlements if direction == "short" else 0.0
-        pnl_real = pnl_theoretical - slippage_cost - funding_cost
+        if direction == "short":
+            funding_usd = -position_value * FUNDING_PER_8H * settlements
+        else:
+            funding_usd = position_value * FUNDING_PER_8H * settlements
+        pnl_real = pnl_theoretical - slippage_cost - funding_usd
 
         current_cap_theoretical += pnl_theoretical
         current_cap_real += pnl_real
@@ -418,7 +454,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "pnl_usd": pnl_theoretical,
             "pnl_usd_real": pnl_real,
             "slippage_usd": slippage_cost,
-            "funding_usd": funding_cost,
+            "funding_usd": funding_usd,
             "fee_usd": fee_cost,
             "bars_held": holding_bars,
             "exit_reason": "末尾平仓",
@@ -479,9 +515,11 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     max_dd = 0
     for t in trades:
         cap += t["pnl_usd"]
-        if cap > peak: peak = cap
+        if cap > peak:
+            peak = cap
         dd = (peak - cap) / peak if peak > 0 else 0
-        if dd > max_dd: max_dd = dd
+        if dd > max_dd:
+            max_dd = dd
 
     # 实盘资金曲线
     cap_r = capital
@@ -489,9 +527,11 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     max_dd_r = 0
     for t in trades:
         cap_r += t["pnl_usd_real"]
-        if cap_r > peak_r: peak_r = cap_r
+        if cap_r > peak_r:
+            peak_r = cap_r
         dd = (peak_r - cap_r) / peak_r if peak_r > 0 else 0
-        if dd > max_dd_r: max_dd_r = dd
+        if dd > max_dd_r:
+            max_dd_r = dd
 
     total_return = (current_cap_theoretical - capital) / capital * 100
     total_return_real = (current_cap_real - capital) / capital * 100
@@ -540,11 +580,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 # 标的读取（从 config.json 的 backtest_tiers / backtest_watchlist）
 # ============================================================
 def resolve_backtest_symbols(cfg, cli_symbols=None):
-    """
-    返回 (symbol_list, symbol_tier_map)
-    - symbol_list: 全部回测标的
-    - symbol_tier_map: {symbol: tier}
-    """
     if cli_symbols:
         return cli_symbols, {s: "satellite" for s in cli_symbols}
 
@@ -560,12 +595,10 @@ def resolve_backtest_symbols(cfg, cli_symbols=None):
                     tier_map[sym] = t
         return symbol_list, tier_map
 
-    # 降级：从 backtest_watchlist 读
     bt_list = cfg.get("backtest_watchlist", [])
     if bt_list:
         return bt_list, {s: "satellite" for s in bt_list}
 
-    # 再降级：backtest_defaults.symbols
     d = cfg.get("backtest_defaults", {})
     fallback = d.get("symbols", ["BTC_USDT"])
     return fallback, {s: "satellite" for s in fallback}
@@ -635,6 +668,8 @@ def _render_trade_card(t, idx, show_real=True):
         html += f" &nbsp;|&nbsp; 滑点 <b style='color:#c0392b;'>-${slip:.2f}</b>"
         if fund > 0:
             html += f" &nbsp;|&nbsp; 资金费率 <b style='color:#c0392b;'>-${fund:.2f}</b>"
+        elif fund < 0:
+            html += f" &nbsp;|&nbsp; 资金费率 <b style='color:#27ae60;'>+${abs(fund):.2f}</b>"
         html += f" &nbsp;|&nbsp; <b>实盘预估</b>：<span style='color:{accent};font-weight:bold;'>{pnl_real_str}</span>"
         html += "</div>"
 
@@ -651,7 +686,7 @@ def _render_trades_cards(trades, show_real=True):
         "<p style='color:#888; font-size:11px; margin:10px 0 0 0; line-height:1.6;'>"
         "💡 <b>时间</b>：北京时间（BJT, UTC+8）<br>"
         "💡 <b>理论盈亏</b>：扣开仓+平仓双边手续费<br>"
-        "💡 <b>实盘预估</b>：再扣滑点 + 资金费率（仅做空）<br>"
+        "💡 <b>实盘预估</b>：再扣滑点 + 资金费率（做空收取，做多支付）<br>"
         "💡 <b>离场原因</b>：<b>止损</b>=触及硬止损｜<b>MA10跌破/突破</b>=动态离场｜"
         "<b>末尾平仓</b>=区间结束时强制平仓"
         "</p>"
@@ -670,11 +705,11 @@ def _render_consistency_notice(fee, capital):
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">滑点</td>
-            <td style="padding:6px 8px;">✅ 分层：核心 <b>0.02%</b>｜卫星 <b>0.05%</b>｜观察 <b>0.10%</b>（双边）</td>
+            <td style="padding:6px 8px;">✅ 分层：核心 <b>0.02%</b>｜卫星 <b>0.05%</b>｜观察 <b>0.10%</b>（单边）</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">资金费率</td>
-            <td style="padding:6px 8px;">✅ 做空持仓成本 <b>0.01% / 8h</b>；做多不计（保守估计）</td>
+            <td style="padding:6px 8px;">✅ 做空收取 <b>0.01% / 8h</b>；做多支付 <b>0.01% / 8h</b>（对称模拟）</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">硬止损</td>
@@ -690,7 +725,7 @@ def _render_consistency_notice(fee, capital):
         </tr>
         <tr>
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">仓位基数</td>
-            <td style="padding:6px 8px;">⚠️ 用当前滚动资金（复利），实盘按固定 {capital}U 反推 → 收益会被复利放大</td>
+            <td style="padding:6px 8px;">✅ 固定本金 <b>{capital}U</b>，单笔风险 2%</td>
         </tr>
     </table>
     <p style="margin:12px 0 0 0; padding:8px; background:#fff3cd; border-radius:6px; font-size:13px; color:#856404;">
@@ -772,14 +807,12 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
 
 
 def _render_tier_table(reports, tier):
-    """渲染某一层的汇总表"""
     if not reports:
         return ""
     tier_icon = TIER_ICON.get(tier, "•")
     tier_cn = TIER_CN.get(tier, tier)
     tier_color = TIER_COLOR.get(tier, "#333")
 
-    # 按实盘预估收益排序
     sorted_r = sorted(reports, key=lambda x: x["total_return_real"], reverse=True)
 
     html = f"<h3 style='margin-top:30px; color:{tier_color}; border-left:5px solid {tier_color}; padding-left:10px;'>"
@@ -812,7 +845,6 @@ def _render_tier_table(reports, tier):
 def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005, capital=10000):
     now = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
 
-    # 分层
     by_tier = {"core": [], "satellite": [], "watch": []}
     for r in all_reports:
         t = r.get("tier", "satellite")
@@ -837,7 +869,6 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
 
     html += _render_consistency_notice(fee, capital)
 
-    # ---------- 全局总览 ----------
     html += "<h3 style='margin-top:30px;'>📈 全局总览</h3>"
     if with_trades:
         avg_ret = sum(r["total_return"] for r in with_trades) / len(with_trades)
@@ -864,12 +895,10 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
         html += "</div>"
     html += "</div>"
 
-    # ---------- 分层汇总表 ----------
     for tier in TIER_ORDER:
         if by_tier[tier]:
             html += _render_tier_table(by_tier[tier], tier)
 
-    # ---------- 分层详细卡片 ----------
     for tier in TIER_ORDER:
         reports_in_tier = sorted(
             [r for r in by_tier[tier] if r["total_trades"] > 0],
@@ -883,7 +912,6 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
 
         html += f"<h3 style='margin-top:40px; color:{tier_color}; border-left:5px solid {tier_color}; padding-left:10px;'>"
         html += f"🔍 {tier_icon} {tier_cn} · 详细交易明细</h3>"
-        # 观察池只展示 top 5，避免报告过长
         detail_n = 5 if tier == "watch" else len(reports_in_tier)
         for r in reports_in_tier[:detail_n]:
             html += _render_single_detail(r, fee=fee, capital=capital)
