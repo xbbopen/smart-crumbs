@@ -134,7 +134,11 @@ def scan_market(all_results, hour_bjt: int = None):
         funding_ext.sort(key=lambda x: abs(x["fr"]), reverse=True)
         near_high.sort(key=lambda x: x["dist"])
         near_low.sort(key=lambda x: x["dist"])
+        oi_spikes.sort(key=lambda x: x["pct"], reverse=True)
+        oi_drops.sort(key=lambda x: x["pct"])
 
+        hotspot["oi_spikes"] = oi_spikes[:TOP_N]
+        hotspot["oi_drops"] = oi_drops[:TOP_N]
         hotspot["top_gainers"] = gainers[:TOP_N]
         hotspot["top_losers"] = losers[:TOP_N]
         hotspot["extreme_greed"] = greed[:TOP_N]
