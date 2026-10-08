@@ -2,7 +2,7 @@
 """
 SQLite 数据库管理模块
 - klines: K线数据
-- meta: 通用键值表（数据源 override + max_available 缓存）
+- meta: 通用键值表（数据源 override + max_available 缓存 + OI 历史）
 """
 import sqlite3
 import os
@@ -15,6 +15,9 @@ DB_PATH = "data/market.db"
 
 SOURCE_OVERRIDE_TTL = 30 * 24 * 3600
 MAX_AVAILABLE_TTL = 30 * 24 * 3600
+
+# OI 历史保留的最大条数（30m 频率下 500 条 ≈ 10 天）
+OI_HISTORY_MAX_LEN = 500
 
 
 def get_conn():
@@ -125,14 +128,13 @@ def clear_source_override(symbol, interval):
 
 
 # ============================================================
-# 🚀 新增：max_available（该标的能拿到的最大根数）
+# max_available（该标的能拿到的最大根数）
 # ============================================================
 def _max_available_key(symbol, interval):
     return f"max_available:{symbol}:{interval}"
 
 
 def get_max_available(symbol, interval):
-    """读取该标的该周期能拿到的最大根数。返回 int 或 None。"""
     key = _max_available_key(symbol, interval)
     raw = get_meta(key)
     if not raw:
@@ -149,7 +151,6 @@ def get_max_available(symbol, interval):
 
 
 def set_max_available(symbol, interval, max_bars):
-    """记录最大可获取根数。TTL 30 天。"""
     key = _max_available_key(symbol, interval)
     data = {
         "max_bars": int(max_bars),
@@ -160,6 +161,100 @@ def set_max_available(symbol, interval, max_bars):
 
 def clear_max_available(symbol, interval):
     delete_meta(_max_available_key(symbol, interval))
+
+
+# ============================================================
+# 🚀 新增：OI 历史（用于计算 OI 变化率）
+# ============================================================
+def _oi_history_key(symbol, interval):
+    return f"oi_history:{symbol}:{interval}"
+
+
+def append_oi_history(symbol, interval, oi_value, max_len=OI_HISTORY_MAX_LEN):
+    """
+    追加一条 OI 记录。oi_value 为币本位 OI（coin 数量），
+    也可以传 USD 计价 OI，只要口径保持一致即可。
+    """
+    if oi_value is None:
+        return
+    try:
+        oi_value = float(oi_value)
+    except (TypeError, ValueError):
+        return
+    if oi_value <= 0:
+        return
+
+    key = _oi_history_key(symbol, interval)
+    raw = get_meta(key)
+    history = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                history = parsed
+        except Exception:
+            history = []
+
+    now_ms = int(time.time() * 1000)
+    # 避免同一时间戳重复写入
+    if history and history[-1].get("ts", 0) == now_ms:
+        history[-1]["oi"] = oi_value
+    else:
+        history.append({"ts": now_ms, "oi": oi_value})
+
+    history = history[-max_len:]
+    set_meta(key, json.dumps(history))
+
+
+def get_oi_change(symbol, interval="30m", lookback_minutes=60):
+    """
+    获取 OI 相对于 lookback_minutes 分钟前的变化百分比。
+    返回 float 或 None（数据不足时）。
+    """
+    key = _oi_history_key(symbol, interval)
+    raw = get_meta(key)
+    if not raw:
+        return None
+    try:
+        history = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(history, list) or len(history) < 2:
+        return None
+
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - lookback_minutes * 60 * 1000
+
+    old = None
+    for h in history:
+        if h.get("ts", 0) <= cutoff_ms:
+            old = h
+        else:
+            break
+    if old is None:
+        old = history[0]
+
+    cur = history[-1]
+    if not old or not cur:
+        return None
+    old_oi = old.get("oi", 0)
+    cur_oi = cur.get("oi", 0)
+    if old_oi <= 0:
+        return None
+    return (cur_oi - old_oi) / old_oi * 100
+
+
+def get_oi_history(symbol, interval="30m"):
+    """调试用：返回完整 OI 历史列表。"""
+    key = _oi_history_key(symbol, interval)
+    raw = get_meta(key)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
 
 
 # ============================================================
