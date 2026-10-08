@@ -36,16 +36,23 @@ class V1DefaultStrategy(BaseStrategy):
         if ema20 and price:
             score += 1 if price > ema20 else -1
         if rsi_4h is not None:
-            if rsi_4h > 55: score += 1
-            elif rsi_4h < 45: score -= 1
+            if rsi_4h > 55:
+                score += 1
+            elif rsi_4h < 45:
+                score -= 1
         if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None:
             score += 1 if macd_4h["dif"] > macd_4h["dea"] else -1
 
-        if score >= 3: return "strong_bull"
-        elif score >= 1: return "bull"
-        elif score <= -3: return "strong_bear"
-        elif score <= -1: return "bear"
-        else: return "neutral"
+        if score >= 3:
+            return "strong_bull"
+        elif score >= 1:
+            return "bull"
+        elif score <= -3:
+            return "strong_bear"
+        elif score <= -1:
+            return "bear"
+        else:
+            return "neutral"
 
     # ================= 动量停滞检测 =================
     def _detect_momentum_stall(self, md):
@@ -178,7 +185,7 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 stages.append({"weight": 40, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
             if ma10 and atr:
-                stop = ma10 - 1.5 * atr
+                stop = ma10 - atr_mult * atr          # 修复：使用分层 ATR 倍数
             elif rl and atr:
                 stop = rl - atr_mult * atr
             else:
@@ -319,8 +326,7 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             if momentum_4h in ("bull", "strong_bull"):
                 result["track_2"]["details"]["硬条件"] = "❌ 4H动能向上，禁止做空"
-            elif trend_1d == "up" and momentum_4h == "neutral":
-                result["track_2"]["details"]["硬条件"] = "❌ 日线多头 + 4H震荡，做空需4H明确转空"
+            # 修复：删除原先对 weak_bull + neutral 的额外阻止，状态机已允许做空
             elif not adx_ok_trend_2:
                 adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
                 result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 20"
