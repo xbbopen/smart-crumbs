@@ -53,19 +53,24 @@ _MIN_INTERVAL = {"binance": 0.3, "gate": 0.3, "hyperliquid": 1.5}
 def normalize_symbol(symbol: str) -> str:
     return symbol.upper().replace("_USDT", "").replace("USDT", "").replace("_", "").strip()
 
+
 def to_hyperliquid_coin(symbol: str) -> str:
     coin = normalize_symbol(symbol)
     return _HL_ALIAS.get(coin, coin)
 
+
 def to_binance_spot(symbol: str) -> str:
     return normalize_symbol(symbol) + "USDT"
+
 
 def to_binance_spot_fallback(symbol: str) -> str:
     coin = normalize_symbol(symbol)
     return _BINANCE_SPOT_ALIAS.get(coin, coin) + "USDT"
 
+
 def to_gate_spot(symbol: str) -> str:
     return normalize_symbol(symbol) + "_USDT"
+
 
 def to_gate_spot_fallback(symbol: str) -> str:
     coin = normalize_symbol(symbol)
@@ -73,12 +78,16 @@ def to_gate_spot_fallback(symbol: str) -> str:
 
 
 def _funding_to_percent(fr):
-    if fr is None: return None
+    if fr is None:
+        return None
     return fr * 100
 
+
 def _funding_to_percentile(fr_percent):
-    if fr_percent is None: return None
-    if fr_percent <= 0: return max(-1.0, fr_percent / 0.01)
+    if fr_percent is None:
+        return None
+    if fr_percent <= 0:
+        return max(-1.0, fr_percent / 0.01)
     return min(1.0, fr_percent / 0.01)
 
 
@@ -108,10 +117,12 @@ def _request_with_retry(url, method="GET", source="binance", max_retries=3, **kw
             r.raise_for_status()
             return True, r.json()
         except requests.exceptions.HTTPError:
-            if attempt == max_retries - 1: return False, "error"
+            if attempt == max_retries - 1:
+                return False, "error"
             time.sleep(2 ** attempt)
         except Exception:
-            if attempt == max_retries - 1: return False, "error"
+            if attempt == max_retries - 1:
+                return False, "error"
             time.sleep(2 ** attempt)
     return False, "rate_limited"
 
@@ -122,16 +133,19 @@ def get_hyperliquid_universe():
     if _HL_UNIVERSE_CACHE is not None and (now - _HL_UNIVERSE_TIME) < _HL_UNIVERSE_TTL:
         return _HL_UNIVERSE_CACHE
     ok, data = _request_with_retry(HYPERLIQUID_INFO_URL, method="POST",
-                                    source="hyperliquid", json={"type": "meta"})
-    if not ok or not isinstance(data, dict): return set()
+                                   source="hyperliquid", json={"type": "meta"})
+    if not ok or not isinstance(data, dict):
+        return set()
     result = set(a["name"].upper() for a in data.get("universe", []) if "name" in a)
     _HL_UNIVERSE_CACHE = result
     _HL_UNIVERSE_TIME = now
     log.info(f"✅ Hyperliquid 币种列表加载成功，共 {len(result)} 个")
     return result
 
+
 def has_hyperliquid_contract(symbol):
     return to_hyperliquid_coin(symbol) in get_hyperliquid_universe()
+
 
 def audit_watchlist(watchlist):
     universe = get_hyperliquid_universe()
@@ -147,11 +161,13 @@ def fetch_binance_spot_klines(symbol, interval="30m", limit=200, start_ms=None, 
     binance_sym = to_binance_spot(symbol)
     url = f"{BINANCE_MIRROR}/api/v3/klines"
     result = _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end_ms)
-    if result[0]: return result
+    if result[0]:
+        return result
     alt_sym = to_binance_spot_fallback(symbol)
     if alt_sym != binance_sym:
         return _fetch_binance_klines_inner(url, alt_sym, interval, limit, start_ms, end_ms)
     return None, result[1]
+
 
 def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end_ms):
     all_klines = []
@@ -159,33 +175,40 @@ def _fetch_binance_klines_inner(url, binance_sym, interval, limit, start_ms, end
         cur = start_ms
         max_loops = math.ceil(limit / 1000) + 2
         for _ in range(max_loops):
-            if cur >= end_ms: break
+            if cur >= end_ms:
+                break
             chunk_end = min(cur + 1000 * INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000), end_ms)
             params = {"symbol": binance_sym, "interval": interval,
                       "startTime": cur, "endTime": chunk_end, "limit": 1000}
             ok, data = _request_with_retry(url, source="binance", params=params)
-            if not ok: return None, data
+            if not ok:
+                return None, data
             if not data:
                 cur = chunk_end + INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000)
                 continue
             all_klines.extend(data)
             cur = int(data[-1][0]) + 1
-            if len(data) < 1000: break
+            if len(data) < 1000:
+                break
     else:
         params = {"symbol": binance_sym, "interval": interval, "limit": min(limit, 1000)}
         ok, data = _request_with_retry(url, source="binance", params=params)
-        if not ok: return None, data
+        if not ok:
+            return None, data
         all_klines = data if data else []
-    if not all_klines: return None, "not_found"
+    if not all_klines:
+        return None, "not_found"
     seen, klines = set(), []
     for item in all_klines:
         ts = int(item[0])
-        if ts in seen: continue
+        if ts in seen:
+            continue
         seen.add(ts)
         klines.append({"timestamp": ts, "open": float(item[1]), "high": float(item[2]),
                        "low": float(item[3]), "close": float(item[4]), "volume": float(item[5])})
     klines.sort(key=lambda x: x["timestamp"])
     return klines, "ok"
+
 
 def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, end_ms=None):
     gate_sym = to_gate_spot(symbol)
@@ -195,7 +218,8 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
         cur = start_ms
         max_loops = math.ceil(limit / 1000) + 2
         for _ in range(max_loops):
-            if cur >= end_ms: break
+            if cur >= end_ms:
+                break
             chunk_end = min(cur + 1000 * INTERVAL_MS_MAP.get(interval, 30 * 60 * 1000), end_ms)
             params = {"currency_pair": gate_sym, "interval": interval, "limit": 1000,
                       "from": cur // 1000, "to": chunk_end // 1000}
@@ -213,7 +237,8 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
                        "low": float(item[4]), "open": float(item[5])} for item in data]
             all_klines.extend(parsed)
             cur = max(k["timestamp"] for k in parsed) + 1
-            if len(data) < 1000: break
+            if len(data) < 1000:
+                break
     else:
         params = {"currency_pair": gate_sym, "interval": interval, "limit": min(limit, 1000)}
         ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
@@ -222,7 +247,8 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
             if alt_sym != gate_sym:
                 params["currency_pair"] = alt_sym
                 ok, data = _request_with_retry(GATEIO_SPOT_URL, source="gate", params=params)
-            if not ok or not data: return None, "not_found"
+            if not ok or not data:
+                return None, "not_found"
         all_klines = [{"timestamp": int(item[0]) * 1000, "volume": float(item[1]),
                        "close": float(item[2]), "high": float(item[3]),
                        "low": float(item[4]), "open": float(item[5])} for item in data]
@@ -233,6 +259,7 @@ def fetch_gateio_spot_klines(symbol, interval="30m", limit=200, start_ms=None, e
             seen.add(k["timestamp"])
             result.append(k)
     return result, "ok"
+
 
 def fetch_hyperliquid_klines(symbol, interval="30m", limit=200, start_ms=None, end_ms=None):
     coin = to_hyperliquid_coin(symbol)
@@ -247,19 +274,23 @@ def fetch_hyperliquid_klines(symbol, interval="30m", limit=200, start_ms=None, e
                "req": {"coin": coin, "interval": interval,
                        "startTime": start_t, "endTime": end_t}}
     ok, data = _request_with_retry(HYPERLIQUID_INFO_URL, method="POST",
-                                    source="hyperliquid", json=payload)
-    if not ok: return None, data
-    if not data or not isinstance(data, list): return None, "not_found"
+                                   source="hyperliquid", json=payload)
+    if not ok:
+        return None, data
+    if not data or not isinstance(data, list):
+        return None, "not_found"
     klines = [{"timestamp": item["t"], "open": float(item["o"]),
                "high": float(item["h"]), "low": float(item["l"]),
                "close": float(item["c"]), "volume": float(item["v"])} for item in data]
     return klines, "ok"
 
+
 def fetch_hyperliquid_metrics(symbol, current_price):
     coin = to_hyperliquid_coin(symbol)
     ok, data = _request_with_retry(HYPERLIQUID_INFO_URL, method="POST",
-                                    source="hyperliquid", json={"type": "metaAndAssetCtxs"})
-    if not ok or not data: return None
+                                   source="hyperliquid", json={"type": "metaAndAssetCtxs"})
+    if not ok or not data:
+        return None
     try:
         meta, ctxs = data[0], data[1]
         for i, asset in enumerate(meta.get("universe", [])):
@@ -271,7 +302,8 @@ def fetch_hyperliquid_metrics(symbol, current_price):
                 return {"funding_rate_raw": float(raw_fr), "funding_rate": fr_percent,
                         "open_interest": oi_usd,
                         "day_volume": float(ctx.get("dayNtlVlm", 0))}
-    except Exception: pass
+    except Exception:
+        pass
     return None
 
 
@@ -363,7 +395,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     override = get_source_override(symbol, interval)
 
     # Hyperliquid 现已上线该合约 → 作废旧 override + max_available
-    # 用 get_primary_source 实际探测，而不是靠 asset_type 判断
     current_primary = get_primary_source(symbol, asset_type)
     if current_primary == "hyperliquid" and override and override != "hyperliquid":
         log.info(f"    [{symbol}][{interval}] ⚡ Hyperliquid 现已上线该合约，作废旧 override ({override})")
@@ -409,7 +440,8 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     if is_full_fetch:
         log.warning(f"[{symbol}][{interval}] DB数据不足({existing_count}/{effective_target})，重新全量拉取")
         for src in sources_to_try:
-            klines_new = _fetch_from_source_full(src, symbol, interval, desired_bars)
+            # 修复：使用 effective_target 而不是 desired_bars
+            klines_new = _fetch_from_source_full(src, symbol, interval, effective_target)
             if klines_new:
                 actual_source = src
                 set_source_override(symbol, interval, src)
@@ -418,7 +450,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
                     set_max_available(symbol, interval, len(klines_new))
                     log.info(f"    [{symbol}][{interval}] ✅ 使用 {src} 成功，拿到 {len(klines_new)} 根（已记录该币上限）")
                 else:
-                    # 已经拉满，清除旧的 max_available
                     clear_max_available(symbol, interval)
                     log.info(f"    [{symbol}][{interval}] ✅ 使用 {src} 成功，拉满 {len(klines_new)} 根")
                 break
@@ -436,7 +467,6 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
                 if klines_new:
                     actual_source = src
                     set_source_override(symbol, interval, src)
-                    # 如果有新增数据，更新 max_available
                     new_total = existing_count + len(klines_new)
                     if max_available and new_total > max_available:
                         set_max_available(symbol, interval, new_total)
@@ -460,13 +490,16 @@ def fetch_and_cache_klines(symbol, asset_type, interval, desired_bars):
     }
 
 
-# ================= 技术指标（不变） =================
+# ================= 技术指标（Wilder 平滑版） =================
 def calc_ma(klines, period=10):
-    if len(klines) < period: return None
+    if len(klines) < period:
+        return None
     return sum(k["close"] for k in klines[-period:]) / period
 
+
 def calc_ema(klines, period):
-    if len(klines) < period: return None
+    if len(klines) < period:
+        return None
     closes = [k["close"] for k in klines]
     k = 2.0 / (period + 1)
     ema = closes[0]
@@ -474,60 +507,137 @@ def calc_ema(klines, period):
         ema = price * k + ema * (1 - k)
     return ema
 
+
 def calc_atr(klines, period=14):
-    if len(klines) < period + 1: return None
-    trs = [max(klines[i]["high"] - klines[i]["low"],
-               abs(klines[i]["high"] - klines[i-1]["close"]),
-               abs(klines[i]["low"] - klines[i-1]["close"]))
-           for i in range(-period, 0)]
-    return sum(trs) / period
+    """Wilder 平滑 ATR。"""
+    if len(klines) < period + 1:
+        return None
+    trs = []
+    for i in range(1, len(klines)):
+        high = klines[i]["high"]
+        low = klines[i]["low"]
+        prev_close = klines[i - 1]["close"]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    atr = sum(trs[:period]) / period
+    for i in range(period, len(trs)):
+        atr = (atr * (period - 1) + trs[i]) / period
+    return atr
+
 
 def calc_rsi(klines, period=14):
-    if len(klines) < period + 1: return None
-    gains, losses = 0, 0
-    for i in range(-period, 0):
-        ch = klines[i]["close"] - klines[i-1]["close"]
-        if ch >= 0: gains += ch
-        else: losses += abs(ch)
-    if losses == 0: return 100
-    return 100 - (100 / (1 + (gains / losses)))
+    """Wilder 平滑 RSI。"""
+    if len(klines) < period + 1:
+        return None
+    closes = [k["close"] for k in klines]
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0.0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
 
 def calc_rsi_series(klines, period=14):
-    if len(klines) < period + 1: return []
-    series = []
-    for i in range(period, len(klines)):
-        r = calc_rsi(klines[:i+1], period)
-        if r is not None: series.append(r)
-    return series
+    """一次性计算 RSI 序列，O(n)。"""
+    if len(klines) < period + 1:
+        return []
+    closes = [k["close"] for k in klines]
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rsi_values = []
+    if avg_loss == 0.0:
+        rsi_values.append(100.0)
+    else:
+        rs = avg_gain / avg_loss
+        rsi_values.append(100.0 - 100.0 / (1.0 + rs))
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0.0:
+            rsi_values.append(100.0)
+        else:
+            rs = avg_gain / avg_loss
+            rsi_values.append(100.0 - 100.0 / (1.0 + rs))
+    return rsi_values
+
 
 def calc_adx(klines, period=14):
-    if len(klines) < period + 1: return None
-    trs, plus_dm, minus_dm = [], [], []
-    for i in range(-period, 0):
-        high, low = klines[i]["high"], klines[i]["low"]
-        prev_high, prev_low, prev_close = klines[i-1]["high"], klines[i-1]["low"], klines[i-1]["close"]
+    """Wilder 平滑 ADX。需要至少 2*period+1 根 K 线。"""
+    if len(klines) < period * 2 + 1:
+        return None
+    trs = []
+    plus_dms = []
+    minus_dms = []
+    for i in range(1, len(klines)):
+        high = klines[i]["high"]
+        low = klines[i]["low"]
+        prev_high = klines[i - 1]["high"]
+        prev_low = klines[i - 1]["low"]
+        prev_close = klines[i - 1]["close"]
         tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        up_move, down_move = high - prev_high, prev_low - low
+        up_move = high - prev_high
+        down_move = prev_low - low
+        plus_dm = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm = down_move if down_move > up_move and down_move > 0 else 0
         trs.append(tr)
-        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
-        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
-    atr = sum(trs) / period
-    if atr == 0: return 0
-    plus_di = 100 * (sum(plus_dm) / period) / atr
-    minus_di = 100 * (sum(minus_dm) / period) / atr
-    if (plus_di + minus_di) == 0: return 0
-    return 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        plus_dms.append(plus_dm)
+        minus_dms.append(minus_dm)
+
+    smoothed_tr = sum(trs[:period])
+    smoothed_plus_dm = sum(plus_dms[:period])
+    smoothed_minus_dm = sum(minus_dms[:period])
+
+    dx_values = []
+    for i in range(period, len(trs)):
+        smoothed_tr = smoothed_tr - (smoothed_tr / period) + trs[i]
+        smoothed_plus_dm = smoothed_plus_dm - (smoothed_plus_dm / period) + plus_dms[i]
+        smoothed_minus_dm = smoothed_minus_dm - (smoothed_minus_dm / period) + minus_dms[i]
+
+        if smoothed_tr == 0:
+            plus_di = 0.0
+            minus_di = 0.0
+        else:
+            plus_di = 100.0 * smoothed_plus_dm / smoothed_tr
+            minus_di = 100.0 * smoothed_minus_dm / smoothed_tr
+
+        if (plus_di + minus_di) == 0:
+            dx = 0.0
+        else:
+            dx = 100.0 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        dx_values.append(dx)
+
+    if len(dx_values) < period:
+        return None
+    adx = sum(dx_values[:period]) / period
+    for i in range(period, len(dx_values)):
+        adx = (adx * (period - 1) + dx_values[i]) / period
+    return adx
+
 
 def calc_macd(klines, fast=12, slow=26, signal=9):
-    if len(klines) < slow + signal: return None, None, None
+    if len(klines) < slow + signal:
+        return None, None, None
     closes = [k["close"] for k in klines]
+
     def ema_series(values, period):
-        if len(values) < period: return []
+        if len(values) < period:
+            return []
         k = 2.0 / (period + 1)
         result = [values[0]]
         for v in values[1:]:
             result.append(v * k + result[-1] * (1 - k))
         return result
+
     ema_fast = ema_series(closes, fast)
     ema_slow = ema_series(closes, slow)
     dif = [f - s for f, s in zip(ema_fast[-len(ema_slow):], ema_slow)]
@@ -535,8 +645,10 @@ def calc_macd(klines, fast=12, slow=26, signal=9):
     macd_hist = [(d - e) * 2 for d, e in zip(dif[-len(dea):], dea)]
     return dif[-1], dea[-1], macd_hist[-1]
 
+
 def calc_kdj(klines, period=9):
-    if len(klines) < period: return None, None, None
+    if len(klines) < period:
+        return None, None, None
     k, d = 50.0, 50.0
     for i in range(period - 1, len(klines)):
         window = klines[i - period + 1:i + 1]
@@ -544,28 +656,34 @@ def calc_kdj(klines, period=9):
         low = min(x["low"] for x in window)
         close = klines[i]["close"]
         rsv = 50.0 if high == low else (close - low) / (high - low) * 100
-        k = (2/3) * k + (1/3) * rsv
-        d = (2/3) * d + (1/3) * k
+        k = (2 / 3) * k + (1 / 3) * rsv
+        d = (2 / 3) * d + (1 / 3) * k
     return k, d, 3 * k - 2 * d
 
+
 def calc_boll(klines, period=20, mult=2):
-    if len(klines) < period: return None, None, None
+    if len(klines) < period:
+        return None, None, None
     closes = [k["close"] for k in klines[-period:]]
     mid = sum(closes) / period
     variance = sum((c - mid) ** 2 for c in closes) / period
     std = variance ** 0.5
     return mid + mult * std, mid, mid - mult * std
 
+
 def find_recent_high(klines, lookback=199):
-    subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
+    subset = klines[-lookback - 1:-1] if len(klines) > lookback + 1 else klines[:-1]
     return max(k["high"] for k in subset) if subset else None
 
+
 def find_recent_low(klines, lookback=199):
-    subset = klines[-lookback-1:-1] if len(klines) > lookback+1 else klines[:-1]
+    subset = klines[-lookback - 1:-1] if len(klines) > lookback + 1 else klines[:-1]
     return min(k["low"] for k in subset) if subset else None
 
+
 def detect_rsi_divergence(klines, rsi_series, look=10):
-    if len(klines) < look + 5 or len(rsi_series) < look + 5: return None
+    if len(klines) < look + 5 or len(rsi_series) < look + 5:
+        return None
     recent_highs = [k["high"] for k in klines[-look:]]
     recent_lows = [k["low"] for k in klines[-look:]]
     recent_rsi = rsi_series[-look:]
@@ -576,8 +694,10 @@ def detect_rsi_divergence(klines, rsi_series, look=10):
         return "bullish"
     return None
 
+
 def aggregate_klines(klines, factor):
-    if not klines or len(klines) < factor: return []
+    if not klines or len(klines) < factor:
+        return []
     result = []
     n = len(klines)
     start = n % factor
