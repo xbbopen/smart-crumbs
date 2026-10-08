@@ -83,7 +83,6 @@ def judge_session(hour_bjt: int) -> str:
 # 二、值翻译函数（供 v1_default.py 使用）
 # ============================================================
 def trend_cn(t):
-    """up / down / neutral → 中文。"""
     return {
         "up": "多头",
         "down": "空头",
@@ -93,7 +92,6 @@ def trend_cn(t):
 
 
 def momentum_cn(m):
-    """4H 动能值 → 中文。"""
     return {
         "strong_bull": "强势多头",
         "bull": "温和多头",
@@ -105,7 +103,6 @@ def momentum_cn(m):
 
 
 def regime_cn(r):
-    """市场状态 → 中文。"""
     return {
         "strong_bull": "强多头",
         "weak_bull": "弱多头",
@@ -120,7 +117,6 @@ def regime_cn(r):
 
 
 def sub_type_cn(s):
-    """track_2 子类型 → 中文。"""
     return {
         "reversal": "见顶反转",
         "trend_follow": "顺势延续",
@@ -129,10 +125,9 @@ def sub_type_cn(s):
 
 
 # ============================================================
-# 三、通用兜底 sanitize（对任意文本做英文→中文替换）
+# 三、通用兜底 sanitize
 # ============================================================
 _SANITIZE_PAIRS = [
-    # 按长度降序，长词先替换，避免子串误伤
     ("strong_bull", "强势多头"),
     ("strong_bear", "强势空头"),
     ("weak_bull_warning", "弱多头警告"),
@@ -168,7 +163,6 @@ _SANITIZE_PAIRS = [
 
 
 def sanitize_text(text):
-    """对任意字符串做英文→中文兜底替换，防止英文暴露。"""
     if text is None:
         return text
     result = str(text)
@@ -394,6 +388,17 @@ HOTSPOT_POOL = {
         "{sym} 距前低仅 {dist}%",
         "{sym} 逼近关键支撑，只差 {dist}%",
     ],
+    # 🚀 新增：OI 异动
+    "oi_spike": [
+        "{sym} 持仓量骤增 {pct}%",
+        "{sym} OI 异动 +{pct}%，杠杆资金入场",
+        "{sym} 未平仓量飙升 {pct}%，多空对赌加剧",
+    ],
+    "oi_drop": [
+        "{sym} 持仓量骤降 {pct}%，清算盘出清",
+        "{sym} OI 崩塌 {pct}%，杠杆被血洗",
+        "{sym} 未平仓量锐减 {pct}%，多头/空头投降",
+    ],
 }
 
 
@@ -409,7 +414,6 @@ TRACK_ID_TO_CN = {
 
 
 def translate_track_ids(text):
-    """把字符串里的 track_1 / track_2 等 ID 替换成中文名。"""
     if not text:
         return text
     for tid in sorted(TRACK_ID_TO_CN.keys(), key=len, reverse=True):
@@ -421,9 +425,6 @@ def translate_track_ids(text):
 # 八、智能提示（与参谋长解读一致，避免自相矛盾）
 # ============================================================
 def build_smart_tips(md, regime):
-    """
-    基于市场状态生成面板提示，确保与参谋长解读方向一致。
-    """
     tips = []
 
     regime_tip = {
@@ -457,6 +458,27 @@ def build_smart_tips(md, regime):
     if fp is not None and fp > 0.7:
         tips.append(f"费率拥挤度 {fp:.0%} 偏高")
 
+    # 🚀 新增：衍生品提示
+    oi_1h = md.get("oi_change_pct_1h")
+    if oi_1h is not None:
+        if oi_1h >= 3.0:
+            tips.append(f"OI 1h 骤增 {oi_1h:+.1f}%，杠杆资金涌入")
+        elif oi_1h <= -3.0:
+            tips.append(f"OI 1h 骤降 {oi_1h:.1f}%，清算盘出清")
+
+    vwap = md.get("vwap_30m")
+    price = md.get("current_price")
+    if vwap and price:
+        dev = (price - vwap) / vwap * 100
+        if dev >= 3.0:
+            tips.append(f"价格高于 VWAP {dev:+.1f}%，短线过热")
+        elif dev <= -3.0:
+            tips.append(f"价格低于 VWAP {dev:.1f}%，短线超卖")
+
+    basis = md.get("basis_pct")
+    if basis is not None and abs(basis) >= 0.05:
+        tips.append(f"基差 {basis:+.3f}%，市场情绪极端")
+
     return tips
 
 
@@ -464,7 +486,6 @@ def build_smart_tips(md, regime):
 # 九、工具函数
 # ============================================================
 def fill(template, **kwargs):
-    """安全填充占位符。缺失字段时保留原样，不抛异常。"""
     try:
         return template.format(**kwargs)
     except (KeyError, IndexError, ValueError):
