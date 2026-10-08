@@ -114,6 +114,18 @@ CONDITION_EXPLANATIONS = {
     "4.1H RSI健康": "1H RSI在40-55之间",
     "5.站上30m MA10": "短期生命线收复",
     "6.4H MACD健康": "4H MACD未死叉",
+    # 🚀 新增：衍生品评分解释
+    "7.OI 1h增幅": "1 小时内未平仓合约增加，说明新多头进场，趋势健康",
+    "7.OI 1h减幅": "1 小时内未平仓合约减少，多为空头回补，见顶特征",
+    "7.OI骤降/费率极端": "OI 骤降=杠杆清算出清；费率极端负=空头拥挤，反弹前兆",
+    "7.VWAP支撑": "价格回踩 VWAP（机构成本线），支撑有效",
+    "7.OI稳定": "4 小时 OI 稳定或略增，说明多头未离场",
+    "8.站上VWAP": "价格站上 VWAP（机构成本线），多头占优",
+    "8.基差/VWAP过热": "基差大幅升水 或 价格远离 VWAP，情绪过热",
+    "8.远离VWAP超卖": "价格远低于 VWAP，短线超卖",
+    "8.OI稳定": "4 小时 OI 稳定，未出现杠杆异动",
+    "B7.OI 1h增加": "1 小时 OI 增加，空头加仓，下跌趋势延续",
+    "B8.VWAP遇阻": "价格反弹到 VWAP 附近遇阻，是顺势做空点",
 }
 
 SIGNAL_GLOSSARY = {
@@ -127,6 +139,10 @@ SIGNAL_GLOSSARY = {
     "布林中轨": "1H的MA20，趋势回踩的经典支撑位。",
     "ATR": "波动幅度，用于止损和仓位计算。",
     "动量停滞": "MACD柱归零 + ADX低位，主力按兵不动，多数轨道不宜出手。",
+    # 🚀 新增
+    "OI": "未平仓合约量。OI 增=新资金入场；OI 减=平仓/清算离场。配合价格可判断趋势真伪。",
+    "VWAP": "成交量加权平均价。代表机构当日/近期的真实持仓成本线，是强支撑/阻力。",
+    "基差": "合约标记价与指数价的差值。大幅升水=多头情绪过热；贴水=空头情绪过冷。",
 }
 
 AD_BANNER = """
@@ -244,6 +260,47 @@ def render_multi_tf_panel(md, regime=None):
         f"<b>📊 数据区间：</b>{range_30m} ｜ {range_1h} ｜ {range_4h} ｜ {range_1d}"
         "</div>"
     )
+    # 🚀 新增：衍生品数据行
+    vwap = md.get("vwap_30m")
+    basis = md.get("basis_pct")
+    oi_1h = md.get("oi_change_pct_1h")
+    oi_4h = md.get("oi_change_pct_4h")
+    oi_usd = md.get("open_interest")
+    funding = md.get("funding_rate")
+
+    deriv_parts = []
+    if vwap:
+        dev = ""
+        if price:
+            dev = f"（现价偏离 {(price-vwap)/vwap*100:+.2f}%）"
+        deriv_parts.append(f"VWAP={vwap:.4f}{dev}")
+    if oi_1h is not None:
+        color = "#27ae60" if oi_1h >= 0 else "#c0392b"
+        deriv_parts.append(
+            f"OI 1h=<span style='color:{color};font-weight:bold;'>{oi_1h:+.2f}%</span>"
+        )
+    if oi_4h is not None:
+        color = "#27ae60" if oi_4h >= 0 else "#c0392b"
+        deriv_parts.append(
+            f"OI 4h=<span style='color:{color};font-weight:bold;'>{oi_4h:+.2f}%</span>"
+        )
+    if oi_usd:
+        deriv_parts.append(f"OI=${oi_usd/1e6:.1f}M")
+    if basis is not None:
+        color = "#c0392b" if abs(basis) >= 0.05 else "#666"
+        deriv_parts.append(
+            f"基差=<span style='color:{color};font-weight:bold;'>{basis:+.3f}%</span>"
+        )
+    if funding is not None:
+        deriv_parts.append(f"费率={funding:+.4f}%")
+
+    if deriv_parts:
+        html += (
+            "<div style='margin-top:8px; padding:8px 10px; background:#fffbea; "
+            "border-left:3px solid #f39c12; border-radius:0 4px 4px 0; font-size:11.5px; color:#666;'>"
+            f"<b>📊 衍生品：</b>{' ｜ '.join(deriv_parts)}"
+            "</div>"
+        )
 
     # tips 基于 regime（与参谋长解读一致）
     try:
@@ -582,6 +639,17 @@ def build_hotspot_section(hotspot):
             f"<span style='display:inline-block;background:{bg};color:{color};padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {prefix} {x['dist']:.2f}%</span>"
             for x in items
         ])
+        
+    def _badge_oi(items, is_spike=True):
+        if not items:
+            return "<span style='color:#999;font-size:13px;'>无</span>"
+        color = "#e74c3c" if is_spike else "#16a085"
+        bg = "#fdeaea" if is_spike else "#e8f8f5"
+        prefix = "OI+" if is_spike else "OI"
+        return "".join([
+            f"<span style='display:inline-block;background:{bg};color:{color};padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {prefix}{x['pct']:+.1f}%</span>"
+            for x in items
+        ])
 
     # --- 组装 HTML ---
     html = (
@@ -609,6 +677,9 @@ def build_hotspot_section(hotspot):
         
         f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#8e44ad; font-weight:bold;'>⚡ 逼近前高</td><td style='padding: 10px 0;'>{_badge_near(hotspot.get('near_highs', []), True)}</td></tr>"
         f"<tr><td style='padding: 10px 0; color:#2980b9; font-weight:bold;'>🛡️ 逼近前低</td><td style='padding: 10px 0;'>{_badge_near(hotspot.get('near_lows', []), False)}</td></tr>"
+        
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#e74c3c; font-weight:bold;'>📊 OI 骤增</td><td style='padding: 10px 0;'>{_badge_oi(hotspot.get('oi_spikes', []), True)}</td></tr>"
+        f"<tr><td style='padding: 10px 0; color:#16a085; font-weight:bold;'>📉 OI 骤降</td><td style='padding: 10px 0;'>{_badge_oi(hotspot.get('oi_drops', []), False)}</td></tr>"
         
         "</table></div></div>"
     )
