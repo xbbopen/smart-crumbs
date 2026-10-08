@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-回测引擎 v8 - 分层回测 + 现实模拟
+回测引擎 v9 - 分层回测 + 现实模拟 + 止损空间诊断
 
-v8 核心改动：
+v9 核心改动：
 1. 从 config.json 的 backtest_tiers 读分层标的，不再拉全市场
 2. 每笔交易扣滑点（按币种分层：核心 0.02% / 卫星 0.05% / 观察 0.10%）
 3. 做空持仓模拟资金费率收入，做多模拟资金费率成本（0.01% / 8h）
@@ -11,8 +11,9 @@ v8 核心改动：
 6. 无冷却期（按用户要求）
 7. 仓位改为固定本金，消除复利偏差
 8. manage_position 改用 K 线 high/low 判断止损/移动止盈，更贴近真实盘面
-9. 每个标的输出离场原因分布日志
-10. 强制行缓冲，GitHub Actions 实时输出
+9. 每个标的输出离场原因分布日志 + 止损空间分布日志
+10. 报告卡片新增止损空间分布块
+11. 强制行缓冲，GitHub Actions 实时输出
 """
 import json, time, argparse, os, math, sys
 import bisect
@@ -239,8 +240,6 @@ def manage_position(pos, kline, ma10, atr):
     返回 (still_hold, exit_price, reason)
     - still_hold=True 表示还在持仓
     - 移动止盈阶段升级不算离场，只更新 pos["stop"] 和 pos["tp_stage"]
-
-    额外副作用：如果移动止盈升级，会设置 pos["_tp_upgraded"]=True 供统计使用
     """
     direction = pos["direction"]
     entry = pos["entry"]
@@ -280,11 +279,9 @@ def manage_position(pos, kline, ma10, atr):
             return False, ma10, "MA10跌破"
     else:
         # 做空
-        # 1. 硬止损（用最高价）
         if high >= stop:
             return False, stop, "止损"
 
-        # 2. 移动止盈阶段升级（用最低价）
         profit_atr = (entry - low) / atr if atr and atr > 0 else 0
         old_stop = pos["stop"]
         if tp_stage < 1 and profit_atr >= 1.0:
@@ -300,15 +297,101 @@ def manage_position(pos, kline, ma10, atr):
             pos["tp_stage"] = 3
             pos["_tp_upgraded"] = True
 
-        # 3. 移动止盈升级后，同一根K线若已突破新止损，按新止损出场
         if pos["stop"] < old_stop and high >= pos["stop"]:
             return False, pos["stop"], "移动止盈回落"
 
-        # 4. MA10 离场（用最高价触发，用 MA10 价成交）
         if ma10 and high > ma10:
             return False, ma10, "MA10突破"
 
     return True, None, None
+
+
+def _calc_risk_stats(trades):
+    """计算止损空间的统计摘要，供报告使用。"""
+    risks = sorted([t["risk_pct"] for t in trades if t.get("risk_pct") is not None])
+    if not risks:
+        return {}
+    n = len(risks)
+    return {
+        "min": round(risks[0], 2),
+        "median": round(risks[n // 2], 2),
+        "avg": round(sum(risks) / n, 2),
+        "p90": round(risks[min(int(n * 0.9), n - 1)], 2),
+        "p95": round(risks[min(int(n * 0.95), n - 1)], 2),
+        "p99": round(risks[min(int(n * 0.99), n - 1)], 2),
+        "max": round(risks[-1], 2),
+    }
+
+
+def _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count):
+    """
+    打印本标的的离场原因分布 + 止损空间分布。
+    """
+    total = len(trades)
+
+    print(f"   📊 离场原因分布（{symbol}）：", flush=True)
+    if total == 0:
+        print(f"      （本区间无交易）", flush=True)
+        return
+
+    # ---------- 离场原因 ----------
+    order = ["止损", "移动止盈回落", "MA10跌破", "MA10突破", "末尾平仓"]
+    for k in order:
+        cnt = exit_reasons.get(k, 0)
+        if cnt == 0:
+            continue
+        pct = cnt / total * 100
+        bar = "█" * int(pct / 5)
+        print(f"      {k:<10} {cnt:>4} 笔 ({pct:>5.1f}%) {bar}", flush=True)
+
+    for k, cnt in exit_reasons.items():
+        if k not in order and cnt > 0:
+            pct = cnt / total * 100
+            print(f"      {k:<10} {cnt:>4} 笔 ({pct:>5.1f}%)", flush=True)
+
+    print(f"      —— 移动止盈升级次数：{tp_upgrade_count}", flush=True)
+    print(f"      —— 平均持仓：{sum(t['bars_held'] for t in trades) / total:.1f} 根 30m", flush=True)
+
+    # ---------- 止损空间分布 ----------
+    risks = sorted([t["risk_pct"] for t in trades if t.get("risk_pct") is not None])
+    if not risks:
+        return
+
+    n = len(risks)
+    avg_r = sum(risks) / n
+    median_r = risks[n // 2]
+    p90 = risks[min(int(n * 0.9), n - 1)]
+    p95 = risks[min(int(n * 0.95), n - 1)]
+    p99 = risks[min(int(n * 0.99), n - 1)]
+    max_r = risks[-1]
+    min_r = risks[0]
+
+    print(f"   📏 止损空间分布（entry→stop 距离 %）：", flush=True)
+    print(f"      最小 {min_r:>6.2f}% ｜ 中位 {median_r:>6.2f}% ｜ 平均 {avg_r:>6.2f}%", flush=True)
+    print(f"      P90 {p90:>6.2f}% ｜ P95 {p95:>6.2f}% ｜ P99 {p99:>6.2f}% ｜ 最大 {max_r:>6.2f}%", flush=True)
+
+    # 分桶直方图
+    buckets = [
+        (0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (4.0, 5.0),
+        (5.0, 7.5), (7.5, 10.0), (10.0, 15.0), (15.0, 20.0), (20.0, 999.0),
+    ]
+    print(f"      分桶：", flush=True)
+    for lo, hi in buckets:
+        cnt = sum(1 for r in risks if lo <= r < hi)
+        if cnt == 0:
+            continue
+        pct = cnt / n * 100
+        bar = "█" * int(pct / 3)
+        label = f"{lo:g}-{hi:g}%" if hi < 999 else f">{lo:g}%"
+        print(f"        {label:<10} {cnt:>4} 笔 ({pct:>5.1f}%) {bar}", flush=True)
+
+    # 止损空间 → 仓位换算
+    print(f"      仓位换算（2% 本金 ÷ 止损空间，上限 50%）：", flush=True)
+    for pctl, val in [("最小", min_r), ("中位", median_r), ("P95", p95), ("最大", max_r)]:
+        if val <= 0:
+            continue
+        pos_pct = min(0.5, 0.02 / (val / 100)) * 100
+        print(f"        {pctl:<3} {val:>6.2f}%  →  仓位 {pos_pct:>5.1f}%", flush=True)
 
 
 # ============================================================
@@ -401,7 +484,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         # ---------- 平仓处理（用整根K线） ----------
         if position is not None:
             current_kline = klines_30m[i]
-            # 每次检查前重置升级标记
             pos_info["_tp_upgraded"] = False
             still_hold, exit_price, reason = manage_position(pos_info, current_kline, ma10, atr)
             if pos_info.get("_tp_upgraded"):
@@ -413,24 +495,20 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 pnl_pct = (exit_price - entry) / entry if direction.startswith("long") else (entry - exit_price) / entry
 
                 risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
-                # 固定本金计算仓位，消除复利偏差
                 position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
 
-                # 理论盈亏（扣手续费）
                 fee_cost = position_value * fee * 2
                 pnl_theoretical = position_value * pnl_pct - fee_cost
 
-                # 现实模拟：滑点
                 slippage_cost = position_value * slippage_rate * 2
 
-                # 现实模拟：资金费率（做空收取，做多支付）
                 holding_bars = i - pos_info["entry_idx"]
                 holding_hours = holding_bars * 0.5
                 settlements = holding_hours / 8
                 if direction == "short":
-                    funding_usd = -position_value * FUNDING_PER_8H * settlements  # 收入
+                    funding_usd = -position_value * FUNDING_PER_8H * settlements
                 else:
-                    funding_usd = position_value * FUNDING_PER_8H * settlements   # 成本
+                    funding_usd = position_value * FUNDING_PER_8H * settlements
                 pnl_real = pnl_theoretical - slippage_cost - funding_usd
 
                 current_cap_theoretical += pnl_theoretical
@@ -536,8 +614,8 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "risk_pct": risk_pct * 100,
         })
 
-    # ---------- 离场原因分布日志 ----------
-    _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count, start_idx, end_idx)
+    # ---------- 离场原因 + 止损空间分布日志 ----------
+    _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count)
 
     # ---------- 统计 ----------
     total = len(trades)
@@ -567,6 +645,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "trades": [],
             "exit_reasons": dict(exit_reasons),
             "tp_upgrade_count": tp_upgrade_count,
+            "risk_stats": {},
         }
 
     # 理论统计
@@ -642,6 +721,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         "trades": trades,
         "exit_reasons": dict(exit_reasons),
         "tp_upgrade_count": tp_upgrade_count,
+        "risk_stats": _calc_risk_stats(trades),
     }
 
     rating, rating_desc = evaluate_strategy(report)
@@ -652,38 +732,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
           f"理论{total_return:.2f}% → 实盘{total_return_real:.2f}% | "
           f"基准{buy_hold:.2f}% | {rating}", flush=True)
     return report
-
-
-def _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count, start_idx, end_idx):
-    """
-    打印本标的的离场原因分布，方便诊断止损结构。
-    """
-    total = len(trades)
-    bars_total = end_idx - start_idx + 1
-
-    print(f"   📊 离场原因分布（{symbol}）：", flush=True)
-    if total == 0:
-        print(f"      （本区间无交易）", flush=True)
-        return
-
-    # 固定顺序展示
-    order = ["止损", "移动止盈回落", "MA10跌破", "MA10突破", "末尾平仓"]
-    for k in order:
-        cnt = exit_reasons.get(k, 0)
-        if cnt == 0:
-            continue
-        pct = cnt / total * 100
-        bar = "█" * int(pct / 5)  # 每 5% 一个方块
-        print(f"      {k:<10} {cnt:>4} 笔 ({pct:>5.1f}%) {bar}", flush=True)
-
-    # 其它未列出的原因
-    for k, cnt in exit_reasons.items():
-        if k not in order and cnt > 0:
-            pct = cnt / total * 100
-            print(f"      {k:<10} {cnt:>4} 笔 ({pct:>5.1f}%)", flush=True)
-
-    print(f"      —— 移动止盈升级次数：{tp_upgrade_count} 次（不含未升级到下一阶段的重复计数）", flush=True)
-    print(f"      —— 平均持仓：{sum(t['bars_held'] for t in trades) / total:.1f} 根 30m", flush=True)
 
 
 # ============================================================
@@ -929,6 +977,26 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
             html += f"&nbsp;&nbsp;· 移动止盈升级次数：<b>{tp_up}</b><br>"
             html += "</div>"
 
+        # 止损空间分布
+        rs = r.get("risk_stats") or {}
+        if rs:
+            html += (
+                "<div style='background:#eaf2f8; padding:12px; border-radius:8px; "
+                "font-size:12.5px; margin-bottom:15px; border-left:4px solid #2980b9;'>"
+                "<b>📏 止损空间分布（entry→stop）：</b><br>"
+                f"&nbsp;&nbsp;· 最小 <b>{rs.get('min', 0)}%</b> ｜ "
+                f"中位 <b>{rs.get('median', 0)}%</b> ｜ "
+                f"平均 <b>{rs.get('avg', 0)}%</b><br>"
+                f"&nbsp;&nbsp;· P90 <b>{rs.get('p90', 0)}%</b> ｜ "
+                f"P95 <b>{rs.get('p95', 0)}%</b> ｜ "
+                f"P99 <b>{rs.get('p99', 0)}%</b> ｜ "
+                f"<span style='color:#c0392b;font-weight:bold;'>最大 {rs.get('max', 0)}%</span><br>"
+                "<span style='color:#888;font-size:11.5px;'>"
+                "💡 止损空间越大，2% 规则反推的仓位越小；极端值（>15%）说明该轨道止损挂得过远。"
+                "</span>"
+                "</div>"
+            )
+
         html += "<h4 style='margin:20px 0 12px 0; color:#2c3e50; font-size:15px;'>📝 交易明细（共 {} 笔）</h4>".format(r["total_trades"])
         html += _render_trades_cards(r["trades"], show_real=True)
 
@@ -1081,7 +1149,7 @@ def main():
     symbol_list, tier_map = resolve_backtest_symbols(cfg, cli_symbols)
 
     print(f"\n{'='*70}", flush=True)
-    print(f"📊 参谋长分层回测引擎 v8", flush=True)
+    print(f"📊 参谋长分层回测引擎 v9", flush=True)
     print(f"   策略：{strategies}", flush=True)
     print(f"   标的数：{len(symbol_list)}", flush=True)
     tier_count = {"core": 0, "satellite": 0, "watch": 0}
