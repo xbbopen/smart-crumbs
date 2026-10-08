@@ -10,10 +10,19 @@ v7 核心改动：
 5. 新增"实盘预估收益"列（扣滑点+费率）
 6. 无冷却期（按用户要求）
 7. 仓位改为固定本金，消除复利偏差
+8. 强制行缓冲，GitHub Actions 实时输出
 """
 import json, time, argparse, os, math, sys
 import bisect
 from datetime import datetime, timezone, timedelta
+
+# 🚀 强制行缓冲，确保 GitHub Actions 实时看到输出
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 from strategies.loader import load_strategy
 from data_fetcher import (
     fetch_and_cache_klines, aggregate_klines,
@@ -88,6 +97,11 @@ def build_market_data_from_slices(symbol, asset_type, window_30m, window_1h,
         "rsi_1h": None, "kdj_1h": None, "boll_1h": None, "macd_1h": None, "rsi_div_1h": None,
         "ema20_4h": None, "ema50_4h": None, "rsi_4h": None, "macd_4h": None, "trend_4h": None,
         "ema50_1d": None, "rsi_1d": None, "trend_1d": None,
+        # 🚀 衍生品字段（回测中通常为 None，走 6 分制降级）
+        "vwap_30m": None,
+        "basis_pct": None,
+        "oi_change_pct_1h": None,
+        "oi_change_pct_4h": None,
     }
 
     klines_30m = window_30m
@@ -258,13 +272,13 @@ def manage_position(pos, cp, ma10, atr):
 # 核心回测逻辑（含滑点+资金费率）
 # ============================================================
 def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms, tier="satellite"):
-    print(f"\n▶️  回测 [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}")
+    print(f"\n▶️  回测 [{TIER_CN.get(tier, tier)}] {strategy_name} | {symbol}", flush=True)
 
     slippage_rate = SLIPPAGE_BY_TIER.get(tier, 0.0005)
 
     klines_30m, info_30m = fetch_and_cache_klines(symbol, asset_type, "30m", BT_BARS_30M)
     if not klines_30m:
-        print(f"⚠️  {symbol} 30m 数据获取失败")
+        print(f"⚠️  {symbol} 30m 数据获取失败", flush=True)
         return None
     klines_4h, info_4h = fetch_and_cache_klines(symbol, asset_type, "4h", BT_BARS_4H)
 
@@ -280,7 +294,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             klines_1d = klines_1d_agg
 
     if len(klines_30m) < 250:
-        print(f"⚠️  {symbol} 30m 数据不足（{len(klines_30m)}根），至少需要250根")
+        print(f"⚠️  {symbol} 30m 数据不足（{len(klines_30m)}根），至少需要250根", flush=True)
         return None
 
     ts_1h = [k["timestamp"] for k in klines_1h]
@@ -299,14 +313,14 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         end_idx = min(end_idx, idx)
 
     if start_idx >= end_idx:
-        print(f"⚠️  {symbol} 回放范围无效")
+        print(f"⚠️  {symbol} 回放范围无效", flush=True)
         return None
 
     backtest_start_ms = ts_30m[start_idx]
     backtest_end_ms = ts_30m[end_idx]
-    print(f"   数据源：{info_30m['actual']} | 30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根")
-    print(f"   回放区间：{fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}")
-    print(f"   滑点：{slippage_rate*100:.3f}% / 费率：{FUNDING_PER_8H*100:.3f}%/8h（做空收入，做多成本）")
+    print(f"   数据源：{info_30m['actual']} | 30m:{len(klines_30m)}根 | 4h:{len(klines_4h)}根 | 1d:{len(klines_1d)}根", flush=True)
+    print(f"   回放区间：{fmt_ts(backtest_start_ms)} ~ {fmt_ts(backtest_end_ms)}", flush=True)
+    print(f"   滑点：{slippage_rate*100:.3f}% / 费率：{FUNDING_PER_8H*100:.3f}%/8h（做空收入，做多成本）", flush=True)
 
     strategy = load_strategy(strategy_name)
     data_mode = "futures" if info_30m["primary"] == "hyperliquid" else "spot"
@@ -346,7 +360,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 pnl_pct = (exit_price - entry) / entry if direction.startswith("long") else (entry - exit_price) / entry
 
                 risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
-                # 修复：使用固定本金计算仓位，消除复利偏差
+                # 固定本金计算仓位，消除复利偏差
                 position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
 
                 # 理论盈亏（扣手续费）
@@ -361,9 +375,9 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 holding_hours = holding_bars * 0.5
                 settlements = holding_hours / 8
                 if direction == "short":
-                    funding_usd = -position_value * FUNDING_PER_8H * settlements  # 收入，负成本
+                    funding_usd = -position_value * FUNDING_PER_8H * settlements  # 收入
                 else:
-                    funding_usd = position_value * FUNDING_PER_8H * settlements   # 成本，正支出
+                    funding_usd = position_value * FUNDING_PER_8H * settlements   # 成本
                 pnl_real = pnl_theoretical - slippage_cost - funding_usd
 
                 current_cap_theoretical += pnl_theoretical
@@ -424,7 +438,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         direction = pos_info["direction"]
         pnl_pct = (cp - entry) / entry if direction.startswith("long") else (entry - cp) / entry
         risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
-        # 修复：固定本金
         position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
 
         fee_cost = position_value * fee * 2
@@ -470,7 +483,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     buy_hold = (klines_30m[end_idx]["close"] - klines_30m[start_idx]["close"]) / klines_30m[start_idx]["close"] * 100
 
     if total == 0:
-        print(f"   ⚠️  未触发任何交易")
+        print(f"   ⚠️  未触发任何交易", flush=True)
         return {
             "strategy": strategy_name, "symbol": symbol, "asset_type": asset_type,
             "tier": tier,
@@ -572,7 +585,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 
     print(f"   ✅ {total}笔 | 胜率{win_rate:.1f}% | "
           f"理论{total_return:.2f}% → 实盘{total_return_real:.2f}% | "
-          f"基准{buy_hold:.2f}% | {rating}")
+          f"基准{buy_hold:.2f}% | {rating}", flush=True)
     return report
 
 
@@ -950,40 +963,40 @@ def main():
     cli_symbols = args.symbols if args.symbols else None
     symbol_list, tier_map = resolve_backtest_symbols(cfg, cli_symbols)
 
-    print(f"\n{'='*70}")
-    print(f"📊 参谋长分层回测引擎 v7")
-    print(f"   策略：{strategies}")
-    print(f"   标的数：{len(symbol_list)}")
+    print(f"\n{'='*70}", flush=True)
+    print(f"📊 参谋长分层回测引擎 v7", flush=True)
+    print(f"   策略：{strategies}", flush=True)
+    print(f"   标的数：{len(symbol_list)}", flush=True)
     tier_count = {"core": 0, "satellite": 0, "watch": 0}
     for s in symbol_list:
         tier_count[tier_map.get(s, "satellite")] = tier_count.get(tier_map.get(s, "satellite"), 0) + 1
-    print(f"   分层：核心 {tier_count.get('core',0)} / 卫星 {tier_count.get('satellite',0)} / 观察 {tier_count.get('watch',0)}")
-    print(f"   区间：{period_desc}")
-    print(f"   本金：{capital}U | 手续费：{fee*100}%")
-    print(f"   数据窗口：30m={BT_BARS_30M}根 / 4h={BT_BARS_4H}根 / 1d={BT_BARS_1D}根")
-    print(f"{'='*70}\n")
+    print(f"   分层：核心 {tier_count.get('core',0)} / 卫星 {tier_count.get('satellite',0)} / 观察 {tier_count.get('watch',0)}", flush=True)
+    print(f"   区间：{period_desc}", flush=True)
+    print(f"   本金：{capital}U | 手续费：{fee*100}%", flush=True)
+    print(f"   数据窗口：30m={BT_BARS_30M}根 / 4h={BT_BARS_4H}根 / 1d={BT_BARS_1D}根", flush=True)
+    print(f"{'='*70}\n", flush=True)
 
     all_reports = []
     t0 = time.time()
     for strat in strategies:
         for i, sym in enumerate(symbol_list, 1):
             tier = tier_map.get(sym, "satellite")
-            print(f"\n[{i}/{len(symbol_list)}] {strat} | {sym} [{tier}] | 已用时 {int(time.time()-t0)}s")
+            print(f"\n[{i}/{len(symbol_list)}] {strat} | {sym} [{tier}] | 已用时 {int(time.time()-t0)}s", flush=True)
             rep = run_single(strat, sym, asset_type, capital, fee, start_ms, end_ms, tier=tier)
             if rep:
                 all_reports.append(rep)
             time.sleep(0.3)
 
     if not all_reports:
-        print("\n❌ 无有效回测结果")
+        print("\n❌ 无有效回测结果", flush=True)
         sys.exit(1)
 
-    print(f"\n{'='*70}")
-    print(f"✅ 回测完成，总用时 {int(time.time()-t0)}s")
-    print(f"   有效报告：{len(all_reports)} 份")
+    print(f"\n{'='*70}", flush=True)
+    print(f"✅ 回测完成，总用时 {int(time.time()-t0)}s", flush=True)
+    print(f"   有效报告：{len(all_reports)} 份", flush=True)
     with_trades = sum(1 for r in all_reports if r["total_trades"] > 0)
-    print(f"   有交易：{with_trades} 份")
-    print(f"{'='*70}")
+    print(f"   有交易：{with_trades} 份", flush=True)
+    print(f"{'='*70}", flush=True)
 
     html = build_tiered_backtest_html(all_reports, strategies, period_desc, fee=fee, capital=capital)
     now_str = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
@@ -991,9 +1004,9 @@ def main():
 
     try:
         send_html_email(subject, html)
-        print("\n📧 回测报告已发送")
+        print("\n📧 回测报告已发送", flush=True)
     except Exception as e:
-        print(f"\n❌ 邮件发送失败：{e}")
+        print(f"\n❌ 邮件发送失败：{e}", flush=True)
         sys.exit(1)
 
 
