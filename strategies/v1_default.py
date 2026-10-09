@@ -10,6 +10,10 @@ MID_COINS = {"SOL", "BNB", "XRP", "ADA", "AVAX", "LINK", "DOGE"}
 # 偏离现价超过此比例的档位会被剔除（防止出现 RLC 那种 -65% 的虚拟挂单）
 MAX_STAGE_DEVIATION = 0.20
 
+# 🔧 v10 调整：保底止损从 1.5% 放宽到 2.5%
+# 原 1.5% 太紧，30m 级别正常波动常达 2%，容易被盘中插针扫损
+FLOOR_STOP_PCT = 0.025
+
 
 def get_atr_multiplier(symbol):
     """按币种流动性/波动性返回 ATR 止损倍数。"""
@@ -129,7 +133,7 @@ class V1DefaultStrategy(BaseStrategy):
           - 结构位止损：形态失效点（rl / rh / boll_mid / ma10）
           - 资金位止损：avg_price ± atr_mult × ATR
           - 做多取更靠上的（max），做空取更靠下的（min）
-          - 1.5% 保底强制生效
+          - 2.5% 保底强制生效（🔧 v10 从 1.5% 调整而来）
         返回的 dict 额外携带 stop_structural / stop_capital / stop_source，供报告展示
         """
         atr_mult = get_atr_multiplier(symbol)
@@ -269,14 +273,15 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 stop, stop_source = avg_price * 1.02, "fallback"
 
-        # ================= 通用保护 3：1.5% 保底 =================
+        # ================= 通用保护 3：2.5% 保底 =================
+        # 🔧 v10 调整：原 1.5% 太紧，30m 级别正常波动常达 2%，容易被扫损
         if is_long:
-            floor_stop = avg_price * 0.985
+            floor_stop = avg_price * (1 - FLOOR_STOP_PCT)
             if stop > floor_stop:
                 stop = floor_stop
                 stop_source = "floor"
         else:
-            floor_stop = avg_price * 1.015
+            floor_stop = avg_price * (1 + FLOOR_STOP_PCT)
             if stop < floor_stop:
                 stop = floor_stop
                 stop_source = "floor"
@@ -569,8 +574,7 @@ class V1DefaultStrategy(BaseStrategy):
             elif not adx_ok_trend_2:
                 adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
                 result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 20"
-            elif ma10 and price > ma10 * 1.02:
-                result["track_2"]["details"]["硬条件"] = "❌ 价格偏离MA10超过2%，禁止追空"
+            # 🔧 v10 调整：删除"价格偏离MA10超过2%，禁止追空"的硬条件
             else:
                 result["track_2"]["hard_ok"] = True
                 result["track_2"]["details"]["硬条件"] = (
