@@ -486,9 +486,10 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     stages = entry_plan.get("stages", [])
     avg_price = entry_plan.get("avg_price", cp)
     stop = entry_plan.get("stop")
-    stop_structural = entry_plan.get("stop_structural")
-    stop_capital = entry_plan.get("stop_capital")
-    stop_source = entry_plan.get("stop_source", "fallback")
+    stop_pct = entry_plan.get("stop_pct", 0)
+    stop_reason = entry_plan.get("stop_reason", "")
+    r_distance = entry_plan.get("r_distance", 0)
+    position_pct = entry_plan.get("position_pct", 0)
     note = entry_plan.get("note", "")
 
     direction_label = "做多" if direction and direction.startswith("long") else "做空"
@@ -498,6 +499,7 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     html = "<div style='background:#fffbea; padding: 15px; border-left: 5px solid #f39c12; margin-top: 15px; border-radius: 0 8px 8px 0;'>"
     html += f"<h4 style='margin-top:0; color:#e67e22; font-size: 18px;'>🎯 参谋长分档{'买入' if is_spot_mode else '入场'}计划</h4>"
     html += f"<p style='font-size:14px; color:#666;'>{note}</p>"
+
     html += "<table style='width:100%; font-size:13px; border-collapse:collapse; margin-top:8px;'>"
     html += "<tr style='background:#f0f0f0;'><th style='padding:6px;'>档位</th><th style='padding:6px;'>仓位</th><th style='padding:6px;'>类型</th><th style='padding:6px;'>价格</th><th style='padding:6px;'>说明</th></tr>"
     for i, s in enumerate(stages, 1):
@@ -514,101 +516,63 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     html += f"<p style='margin-top:12px;'><b>加权平均{'买入' if is_spot_mode else '入场'}价：</b><span style='color:#e67e22; font-weight:bold;'>${avg_price:.4f}</span></p>"
 
     if stop:
-        risk_pct = abs(avg_price - stop) / avg_price
+        # 止损锚点
+        html += "<div style='background:#f0f4f8; padding:12px; border-radius:8px; margin-top:12px; border-left:4px solid #8e44ad; font-size:13px;'>"
+        html += "<b>🛡️ 止损（形态失效点）：</b><br>"
+        html += f"&nbsp;&nbsp;· 硬止损价：<b style='color:#d32f2f;'>${stop:.4f}</b><br>"
+        html += f"&nbsp;&nbsp;· 止损空间：<b>{stop_pct:.2f}%</b><br>"
+        html += f"&nbsp;&nbsp;· 形态依据：{stop_reason}<br>"
+        html += f"&nbsp;&nbsp;· <span style='color:#888;font-size:11.5px;'>止损空间被限制在 1.5%~6% 之间；超过 6% 的信号被拒绝</span>"
+        html += "</div>"
+
+        # 仓位计算
         if is_spot_mode:
             max_loss = 200
+            risk_pct = stop_pct / 100
             position_value = min(10000, max_loss / risk_pct) if risk_pct > 0 else 10000
             coin_amount = position_value / avg_price if avg_price else 0
-            html += f"<p><b>止损触发价：</b><span style='color:#d32f2f; font-weight:bold;'>${stop:.4f}</span></p>"
-            html += f"<p><b>止损空间：</b>{risk_pct*100:.2f}%</p>"
-            html += f"<p><b>🛡️ 现货2%规则（本金10000U）：</b>建议买入 <b>{position_value:.2f} USDT</b>，"
-            html += f"对应 <b>{coin_amount:.4f} 个 {md.get('symbol','').replace('_USDT','')}</b>。<br>"
-            html += f"<span style='color:#e67e22;'>若止损触发，最大亏损约 {max_loss} U（占本金 2%）。</span></p>"
+            html += "<div style='background:#f0f8f0; padding:12px; border-radius:8px; margin-top:10px; border-left:4px solid #27ae60; font-size:13px;'>"
+            html += "<b>🛡️ 现货2%资金管理（本金10000U）：</b><br>"
+            html += f"&nbsp;&nbsp;· 止损触发最大亏损：<b>{max_loss}U</b>（本金2%）<br>"
+            html += f"&nbsp;&nbsp;· 建议买入：<b>{position_value:.2f} USDT</b>，对应 <b>{coin_amount:.4f} 个</b>"
+            html += "</div>"
         else:
-            position_pct = min(0.5, 0.02 / risk_pct) if risk_pct > 0 else 0.5
-            position_value = 10000 * position_pct
+            position_value = 10000 * (position_pct / 100)
             margin_10x = position_value / 10
             coin_amount = position_value / avg_price if avg_price else 0
-            html += f"<p><b>硬止损价：</b><span style='color:#d32f2f; font-weight:bold;'>${stop:.4f}</span></p>"
-            html += f"<p><b>止损空间：</b>{risk_pct*100:.2f}%</p>"
-            html += f"<p><b>🛡️ 2%资金管理（本金10000U）：</b>最大总仓位 <b>{position_value:.2f} USDT</b>。<br>"
-            html += f"10倍杠杆下，投入保证金 <b>{margin_10x:.2f} USDT</b>，"
-            html += f"总开仓数量 <b>{coin_amount:.4f} 个</b>（按各档位权重分配）。</p>"
+            loss_pct = position_pct * stop_pct / 100 / 100  # 仓位% × 止损空间%
+            html += "<div style='background:#f0f8f0; padding:12px; border-radius:8px; margin-top:10px; border-left:4px solid #27ae60; font-size:13px;'>"
+            html += "<b>🛡️ 2%资金管理（本金10000U）：</b><br>"
+            html += f"&nbsp;&nbsp;· 计划仓位：<b>{position_pct:.2f}%</b>（受 50% 上限约束）<br>"
+            html += f"&nbsp;&nbsp;· 止损触发亏损：<b>{loss_pct*100:.2f}%</b> 本金<br>"
+            html += f"&nbsp;&nbsp;· 10倍杠杆下投入保证金：<b>${margin_10x:.2f}</b><br>"
+            html += f"&nbsp;&nbsp;· 总开仓数量：<b>{coin_amount:.4f} 个</b>"
+            html += "</div>"
 
-        # ================= 双锚点止损对比 =================
-        html += "<div style='background:#f0f4f8; padding:12px; border-radius:8px; margin-top:12px; border-left:4px solid #2c3e50; font-size:13px;'>"
-        html += "<b>📊 止损锚点对比：</b><br>"
+        # 移动止盈方案
+        if r_distance > 0:
+            if direction and direction.startswith("long"):
+                breakeven_price = avg_price + r_distance
+            else:
+                breakeven_price = avg_price - r_distance
+            html += "<div style='background:#eaf2f8; padding:12px; border-radius:8px; margin-top:10px; border-left:4px solid #2980b9; font-size:13px;'>"
+            html += "<b>📈 移动止盈方案：</b><br>"
+            html += f"&nbsp;&nbsp;① 保本触发：价格到 <b>${breakeven_price:.4f}</b>（盈利 1R = {r_distance:.4f}）时，止损移至成本价 ${avg_price:.4f}<br>"
+            html += f"&nbsp;&nbsp;② 跟踪阶段：保本后，止损跟随 <b>30m MA10</b> 上移（只升不降 / 只降不升）<br>"
+            html += f"&nbsp;&nbsp;③ 离场条件：收盘价跌破当前止损时平仓"
+            html += "</div>"
 
-        if stop_structural is not None:
-            s_dev = (stop_structural - avg_price) / avg_price * 100
-            html += (f"&nbsp;&nbsp;· 结构位止损：<b>${stop_structural:.4f}</b>"
-                     f"（形态失效点，距入场 <b>{s_dev:+.2f}%</b>）<br>")
-        else:
-            html += "&nbsp;&nbsp;· 结构位止损：<span style='color:#999;'>本单不适用（无有效结构位数据）</span><br>"
-
-        if stop_capital is not None:
-            c_dev = (stop_capital - avg_price) / avg_price * 100
-            html += (f"&nbsp;&nbsp;· 资金位止损：<b>${stop_capital:.4f}</b>"
-                     f"（按 ATR 计算的资金保护，距入场 <b>{c_dev:+.2f}%</b>）<br>")
-        else:
-            html += "&nbsp;&nbsp;· 资金位止损：<span style='color:#999;'>不适用</span><br>"
-
-        if stop_source == "structural":
-            source_label = "✅ 结构位"
-            source_desc = "结构位比资金位更早触发，形态一旦破坏立即离场"
-        elif stop_source == "capital":
-            source_label = "✅ 资金位"
-            source_desc = "结构位距离过远或已失效，采用资金保护止损"
-        elif stop_source == "floor":
-            # 🔧 v10 调整：说明从 1.5% 改为 2.5%
-            source_label = "✅ 2.5% 保底"
-            source_desc = "双锚点均过近，强制启用最小止损距离保护"
-        else:
-            source_label = "✅ 兜底 2%"
-            source_desc = "异常情况，使用固定 2% 兜底"
-
-        html += (f"&nbsp;&nbsp;· <b>最终采用：{source_label}</b>（${stop:.4f}）<br>"
-                 f"&nbsp;&nbsp;· 说明：{source_desc}"
-                 "</div>")
-
-    if avg_price and stop:
-        # 三段式止盈：基于加权入场价设置最小空间
-        # 🔧 v10 调整：最小值从 1.5% 提到 2.5%，与止损保底对齐
-        raw_atr = md.get("atr")
-        if raw_atr is None or raw_atr <= 0:
-            raw_atr = 0
-        min_tp_space = avg_price * 0.025
-        true_atr = max(float(raw_atr), min_tp_space)
-
-        if direction and direction.startswith("long"):
-            tp1 = avg_price + true_atr * 1.0
-            tp2 = avg_price + true_atr * 2.0
-            tp3 = avg_price + true_atr * 3.0
-        else:
-            tp1 = avg_price - true_atr * 1.0
-            tp2 = avg_price - true_atr * 2.0
-            tp3 = avg_price - true_atr * 3.0
-
-        html += "<p><b>📐 三段式移动止盈：</b><br>"
-        html += f"1️⃣ 价格到 <b>${tp1:.4f}</b> 时，止损移至加权成本价 ${avg_price:.4f}<br>"
-        html += f"2️⃣ 价格到 <b>${tp2:.4f}</b> 时，止损移至 ${tp1:.4f}<br>"
-        html += f"3️⃣ 价格到 <b>${tp3:.4f}</b> 时，止损移至 ${tp2:.4f}，止盈50%仓位</p>"
-
-    # 🔧 v10 调整：显示 MA10 触发价（含 0.3% 缓冲），与回测判定标准对齐
-    # 做多：收盘价跌破 ma10 × 0.997 才离场
-    # 做空：收盘价突破 ma10 × 1.003 才离场
     ma10_val = md.get('ma10')
     if isinstance(ma10_val, (int, float)):
         is_long_dir = bool(direction and direction.startswith("long"))
         if is_long_dir:
-            trigger_price = ma10_val * 0.997
-            trigger_tip = f"收盘价跌破 <b>${trigger_price:.4f}</b> 才离场（含 0.3% 缓冲）"
+            trigger_tip = "收盘价跌破即离场"
         else:
-            trigger_price = ma10_val * 1.003
-            trigger_tip = f"收盘价突破 <b>${trigger_price:.4f}</b> 才离场（含 0.3% 缓冲）"
-        html += f"<p><b>MA10动态离场线：</b>${ma10_val:.4f} <span style='color:#e67e22;font-size:12px;'>（{trigger_tip}）</span></p>"
+            trigger_tip = "收盘价突破即离场"
+        html += f"<p><b>MA10动态跟踪线：</b>${ma10_val:.4f} <span style='color:#e67e22;font-size:12px;'>（{trigger_tip}）</span></p>"
     else:
-        html += f"<p><b>MA10动态离场线：</b>N/A</p>"
+        html += f"<p><b>MA10动态跟踪线：</b>N/A</p>"
+
     html += "</div>"
     return html
 
