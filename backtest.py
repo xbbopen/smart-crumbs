@@ -264,7 +264,7 @@ def manage_position(pos, kline, ma10, atr):
     1. 先判断硬止损（做多用 low，做空用 high）
     2. 再用 high（做多）/ low（做空）判断移动止盈阶段是否升级
     3. 移动止盈升级后，如果同一根 K 线已经触及新止损，则按新止损出场
-    4. 最后判断 MA10 离场（用 low/high 触发，用 MA10 价成交）
+    4. 最后判断 MA10 离场（🔧 v10 调整：改用 close + 0.3% 缓冲，避免盘中插针扫损）
 
     返回 (still_hold, exit_price, reason)
     - still_hold=True 表示还在持仓
@@ -277,6 +277,7 @@ def manage_position(pos, kline, ma10, atr):
 
     high = kline["high"]
     low = kline["low"]
+    close = kline["close"]  # 🔧 v10 新增：用于 MA10 离场判断
 
     if direction.startswith("long"):
         # 1. 硬止损（用最低价）
@@ -303,9 +304,9 @@ def manage_position(pos, kline, ma10, atr):
         if pos["stop"] > old_stop and low <= pos["stop"]:
             return False, pos["stop"], "移动止盈回落"
 
-        # 4. MA10 离场（用最低价触发，用 MA10 价成交）
-        if ma10 and low < ma10:
-            return False, ma10, "MA10跌破"
+        # 4. MA10 离场（🔧 v10 调整：改用 close + 0.3% 缓冲，避免盘中插针扫损）
+        if ma10 and close < ma10 * 0.997:
+            return False, close, "MA10跌破"
     else:
         # 做空
         if high >= stop:
@@ -329,8 +330,9 @@ def manage_position(pos, kline, ma10, atr):
         if pos["stop"] < old_stop and high >= pos["stop"]:
             return False, pos["stop"], "移动止盈回落"
 
-        if ma10 and high > ma10:
-            return False, ma10, "MA10突破"
+        # 🔧 v10 调整：改用 close + 0.3% 缓冲
+        if ma10 and close > ma10 * 1.003:
+            return False, close, "MA10突破"
 
     return True, None, None
 
