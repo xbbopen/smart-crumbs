@@ -594,9 +594,21 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
         html += f"2️⃣ 价格到 <b>${tp2:.4f}</b> 时，止损移至 ${tp1:.4f}<br>"
         html += f"3️⃣ 价格到 <b>${tp3:.4f}</b> 时，止损移至 ${tp2:.4f}，止盈50%仓位</p>"
 
+    # 🔧 v10 调整：显示 MA10 触发价（含 0.3% 缓冲），与回测判定标准对齐
+    # 做多：收盘价跌破 ma10 × 0.997 才离场
+    # 做空：收盘价突破 ma10 × 1.003 才离场
     ma10_val = md.get('ma10')
-    ma10_str = f"${ma10_val:.4f}" if isinstance(ma10_val, (int, float)) else "N/A"
-    html += f"<p><b>MA10动态离场线：</b>{ma10_str}</p>"
+    if isinstance(ma10_val, (int, float)):
+        is_long_dir = bool(direction and direction.startswith("long"))
+        if is_long_dir:
+            trigger_price = ma10_val * 0.997
+            trigger_tip = f"收盘价跌破 <b>${trigger_price:.4f}</b> 才离场（含 0.3% 缓冲）"
+        else:
+            trigger_price = ma10_val * 1.003
+            trigger_tip = f"收盘价突破 <b>${trigger_price:.4f}</b> 才离场（含 0.3% 缓冲）"
+        html += f"<p><b>MA10动态离场线：</b>${ma10_val:.4f} <span style='color:#e67e22;font-size:12px;'>（{trigger_tip}）</span></p>"
+    else:
+        html += f"<p><b>MA10动态离场线：</b>N/A</p>"
     html += "</div>"
     return html
 
