@@ -486,10 +486,14 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     stages = entry_plan.get("stages", [])
     avg_price = entry_plan.get("avg_price", cp)
     stop = entry_plan.get("stop")
+    stop_structural = entry_plan.get("stop_structural")
+    stop_capital = entry_plan.get("stop_capital")
+    stop_source = entry_plan.get("stop_source", "fallback")
     note = entry_plan.get("note", "")
 
     direction_label = "做多" if direction and direction.startswith("long") else "做空"
-    if direction == "spot_warning": direction_label = "逃顶减仓"
+    if direction == "spot_warning":
+        direction_label = "逃顶减仓"
 
     html = "<div style='background:#fffbea; padding: 15px; border-left: 5px solid #f39c12; margin-top: 15px; border-radius: 0 8px 8px 0;'>"
     html += f"<h4 style='margin-top:0; color:#e67e22; font-size: 18px;'>🎯 参谋长分档{'买入' if is_spot_mode else '入场'}计划</h4>"
@@ -508,6 +512,7 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
     html += "</table>"
 
     html += f"<p style='margin-top:12px;'><b>加权平均{'买入' if is_spot_mode else '入场'}价：</b><span style='color:#e67e22; font-weight:bold;'>${avg_price:.4f}</span></p>"
+
     if stop:
         risk_pct = abs(avg_price - stop) / avg_price
         if is_spot_mode:
@@ -530,11 +535,48 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
             html += f"10倍杠杆下，投入保证金 <b>{margin_10x:.2f} USDT</b>，"
             html += f"总开仓数量 <b>{coin_amount:.4f} 个</b>（按各档位权重分配）。</p>"
 
+        # ================= 双锚点止损对比 =================
+        html += "<div style='background:#f0f4f8; padding:12px; border-radius:8px; margin-top:12px; border-left:4px solid #2c3e50; font-size:13px;'>"
+        html += "<b>📊 止损锚点对比：</b><br>"
+
+        if stop_structural is not None:
+            s_dev = (stop_structural - avg_price) / avg_price * 100
+            html += (f"&nbsp;&nbsp;· 结构位止损：<b>${stop_structural:.4f}</b>"
+                     f"（形态失效点，距入场 <b>{s_dev:+.2f}%</b>）<br>")
+        else:
+            html += "&nbsp;&nbsp;· 结构位止损：<span style='color:#999;'>本单不适用（无有效结构位数据）</span><br>"
+
+        if stop_capital is not None:
+            c_dev = (stop_capital - avg_price) / avg_price * 100
+            html += (f"&nbsp;&nbsp;· 资金位止损：<b>${stop_capital:.4f}</b>"
+                     f"（按 ATR 计算的资金保护，距入场 <b>{c_dev:+.2f}%</b>）<br>")
+        else:
+            html += "&nbsp;&nbsp;· 资金位止损：<span style='color:#999;'>不适用</span><br>"
+
+        if stop_source == "structural":
+            source_label = "✅ 结构位"
+            source_desc = "结构位比资金位更早触发，形态一旦破坏立即离场"
+        elif stop_source == "capital":
+            source_label = "✅ 资金位"
+            source_desc = "结构位距离过远或已失效，采用资金保护止损"
+        elif stop_source == "floor":
+            source_label = "✅ 1.5% 保底"
+            source_desc = "双锚点均过近，强制启用最小止损距离保护"
+        else:
+            source_label = "✅ 兜底 2%"
+            source_desc = "异常情况，使用固定 2% 兜底"
+
+        html += (f"&nbsp;&nbsp;· <b>最终采用：{source_label}</b>（${stop:.4f}）<br>"
+                 f"&nbsp;&nbsp;· 说明：{source_desc}"
+                 "</div>")
+
     if avg_price and stop:
-        # 修复：三段式止盈改用 ATR 计算，防止止损空间畸小时止盈也畸小
-        true_atr = md.get("atr")
-        if not true_atr or true_atr <= 0:
-            true_atr = avg_price * 0.015  # 兜底：1.5% 波动率
+        # 三段式止盈：基于加权入场价设置最小 1.5% 空间
+        raw_atr = md.get("atr")
+        if raw_atr is None or raw_atr <= 0:
+            raw_atr = 0
+        min_tp_space = avg_price * 0.015
+        true_atr = max(float(raw_atr), min_tp_space)
 
         if direction and direction.startswith("long"):
             tp1 = avg_price + true_atr * 1.0
@@ -544,7 +586,7 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
             tp1 = avg_price - true_atr * 1.0
             tp2 = avg_price - true_atr * 2.0
             tp3 = avg_price - true_atr * 3.0
-            
+
         html += "<p><b>📐 三段式移动止盈：</b><br>"
         html += f"1️⃣ 价格到 <b>${tp1:.4f}</b> 时，止损移至加权成本价 ${avg_price:.4f}<br>"
         html += f"2️⃣ 价格到 <b>${tp2:.4f}</b> 时，止损移至 ${tp1:.4f}<br>"
