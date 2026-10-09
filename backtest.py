@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-回测引擎 v10 - 分层回测 + 现实模拟 + 止损空间诊断 + 挂单成交判断
+回测引擎 v9 - 分层回测 + 现实模拟 + 止损空间诊断
 
-v9 核心改动（保留）：
+v9 核心改动：
 1. 从 config.json 的 backtest_tiers 读分层标的，不再拉全市场
 2. 每笔交易扣滑点（按币种分层：核心 0.02% / 卫星 0.05% / 观察 0.10%）
 3. 做空持仓模拟资金费率收入，做多模拟资金费率成本（0.01% / 8h）
@@ -15,14 +15,10 @@ v9 核心改动（保留）：
 10. 报告卡片新增止损空间分布块
 11. 强制行缓冲，GitHub Actions 实时输出
 
-🚀 v10 新增：
-12. 加 VWAP 计算（与监控对齐）
-13. 挂单成交判断：只有当根 K 线触及挂单价才成交（做多用 low，做空用 high）
-14. 部分成交按实际权重计算仓位（不补齐到计划仓位）
-15. 一档都没成交 → 信号作废，不进 trades
-16. 交易卡片显示止损来源（结构位/资金位/1.5%保底/兜底2%）
-17. 报告新增"挂单成交统计"和"信号作废数"
-18. 报告口径说明增加"挂单成交"、"部分成交"、"双锚点止损"三项
+🔧 v9+ 调整：
+12. 对接 v1_default.py 最新 entry_plan 结构：读取 stop_source / stop_structural / stop_capital
+13. 报告展示"止损来源分布"（结构位 / 资金位 / 保底 / 兜底）
+14. 交易卡片显示单笔止损来源标签
 """
 import json, time, argparse, os, math, sys
 import bisect
@@ -43,7 +39,6 @@ from data_fetcher import (
     calc_macd, calc_kdj, calc_boll, calc_rsi_series,
     detect_rsi_divergence, find_recent_high, find_recent_low,
     get_primary_source, to_hyperliquid_coin, get_hyperliquid_universe,
-    calc_vwap,  # 🚀 v10 新增
 )
 from email_sender import send_html_email
 
@@ -69,11 +64,11 @@ TIER_ORDER = ["core", "satellite", "watch"]
 TIER_ICON = {"core": "🏆", "satellite": "🥇", "watch": "🔬"}
 TIER_COLOR = {"core": "#27ae60", "satellite": "#3498db", "watch": "#9b59b6"}
 
-# 🚀 v10 新增：止损来源标签与颜色映射
+# 🔧 v9+ 新增：止损来源标签与颜色映射
 STOP_SOURCE_LABEL = {
     "structural": "结构位",
     "capital": "资金位",
-    "floor": "1.5%保底",
+    "floor": "保底",
     "fallback": "兜底2%",
     "unknown": "未知",
 }
@@ -145,9 +140,6 @@ def build_market_data_from_slices(symbol, asset_type, window_30m, window_1h,
     md["adx"] = calc_adx(klines_30m, 14)
     md["recent_high"] = find_recent_high(klines_30m, 199)
     md["recent_low"] = find_recent_low(klines_30m, 199)
-
-    # 🚀 v10 新增：VWAP 计算（与监控对齐）
-    md["vwap_30m"] = calc_vwap(klines_30m, 48)
 
     if len(klines_1h) >= 20:
         md["rsi_1h"] = calc_rsi(klines_1h, 14)
@@ -264,7 +256,7 @@ def manage_position(pos, kline, ma10, atr):
     1. 先判断硬止损（做多用 low，做空用 high）
     2. 再用 high（做多）/ low（做空）判断移动止盈阶段是否升级
     3. 移动止盈升级后，如果同一根 K 线已经触及新止损，则按新止损出场
-    4. 最后判断 MA10 离场（🔧 v10 调整：改用 close + 0.3% 缓冲，避免盘中插针扫损）
+    4. 最后判断 MA10 离场（用 low/high 触发，用 MA10 价成交）
 
     返回 (still_hold, exit_price, reason)
     - still_hold=True 表示还在持仓
@@ -277,7 +269,6 @@ def manage_position(pos, kline, ma10, atr):
 
     high = kline["high"]
     low = kline["low"]
-    close = kline["close"]  # 🔧 v10 新增：用于 MA10 离场判断
 
     if direction.startswith("long"):
         # 1. 硬止损（用最低价）
@@ -304,9 +295,9 @@ def manage_position(pos, kline, ma10, atr):
         if pos["stop"] > old_stop and low <= pos["stop"]:
             return False, pos["stop"], "移动止盈回落"
 
-        # 4. MA10 离场（🔧 v10 调整：改用 close + 0.3% 缓冲，避免盘中插针扫损）
-        if ma10 and close < ma10 * 0.997:
-            return False, close, "MA10跌破"
+        # 4. MA10 离场（用最低价触发，用 MA10 价成交）
+        if ma10 and low < ma10:
+            return False, ma10, "MA10跌破"
     else:
         # 做空
         if high >= stop:
@@ -330,9 +321,8 @@ def manage_position(pos, kline, ma10, atr):
         if pos["stop"] < old_stop and high >= pos["stop"]:
             return False, pos["stop"], "移动止盈回落"
 
-        # 🔧 v10 调整：改用 close + 0.3% 缓冲
-        if ma10 and close > ma10 * 1.003:
-            return False, close, "MA10突破"
+        if ma10 and high > ma10:
+            return False, ma10, "MA10突破"
 
     return True, None, None
 
@@ -354,78 +344,10 @@ def _calc_risk_stats(trades):
     }
 
 
-def _calc_fill_stats(trades):
-    """🚀 v10 新增：统计挂单成交情况。"""
-    if not trades:
-        return {}
-    planned = sum(t.get("planned_stages", 0) for t in trades)
-    filled = sum(t.get("filled_stages", 0) for t in trades)
-    full = sum(1 for t in trades if t.get("filled_stages", 0) == t.get("planned_stages", 0))
-    partial = sum(1 for t in trades if 0 < t.get("filled_stages", 0) < t.get("planned_stages", 0))
-    return {
-        "planned_stages_total": planned,
-        "filled_stages_total": filled,
-        "full_fill_trades": full,
-        "partial_fill_trades": partial,
-        "fill_rate": round(filled / planned * 100, 1) if planned > 0 else 0,
-    }
-
-
-def _check_stage_filled(stage, direction, kline):
-    """
-    🚀 v10 新增：判断单个挂单档位是否在给定 K 线内成交。
-    - 市价单：必然成交
-    - 限价单：做多时 low <= 挂单价；做空时 high >= 挂单价
-    """
-    if stage.get("type") == "market":
-        return True
-    price = stage.get("price")
-    if price is None:
-        return False
-    if direction.startswith("long"):
-        return kline["low"] <= price
-    else:
-        return kline["high"] >= price
-
-
-def _simulate_fill(entry_plan, direction, kline, cp):
-    """
-    🚀 v10 新增：模拟一根 K 线内的挂单成交。
-    返回 (filled_stages, actual_entry_price, actual_weight_pct) 或 (None, None, None) 表示完全没成交。
-    - filled_stages: 成交的档位列表
-    - actual_entry_price: 按实际成交权重算的加权入场价
-    - actual_weight_pct: 实际成交权重占计划总权重的比例（0~1）
-    """
-    stages = entry_plan.get("stages", [])
-    if not stages:
-        return None, None, None
-
-    planned_total_weight = sum(s["weight"] for s in stages)
-    if planned_total_weight <= 0:
-        return None, None, None
-
-    filled = []
-    for s in stages:
-        if _check_stage_filled(s, direction, kline):
-            filled.append(s)
-
-    if not filled:
-        return None, None, None
-
-    filled_weight = sum(s["weight"] for s in filled)
-    if filled_weight <= 0:
-        return None, None, None
-
-    actual_entry = sum(s["price"] * s["weight"] for s in filled) / filled_weight
-    actual_weight_pct = filled_weight / planned_total_weight
-
-    return filled, actual_entry, actual_weight_pct
-
-
 def _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count):
     """
     打印本标的的离场原因分布 + 止损空间分布。
-    🚀 v10 新增：止损来源分布 + 挂单成交分布
+    🔧 v9+ 新增：止损来源分布
     """
     total = len(trades)
 
@@ -452,13 +374,13 @@ def _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count):
     print(f"      —— 移动止盈升级次数：{tp_upgrade_count}", flush=True)
     print(f"      —— 平均持仓：{sum(t['bars_held'] for t in trades) / total:.1f} 根 30m", flush=True)
 
-    # 🚀 v10 新增：止损来源分布
+    # 🔧 v9+ 新增：止损来源分布
     source_counter = Counter(t.get("stop_source", "unknown") for t in trades)
     if source_counter:
         src_label = {
             "structural": "结构位",
             "capital": "资金位",
-            "floor": "1.5%保底",
+            "floor": "保底",
             "fallback": "兜底2%",
             "unknown": "未知",
         }
@@ -467,16 +389,6 @@ def _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count):
             pct = cnt / total * 100
             label = src_label.get(k, k)
             print(f"      {label:<10} {cnt:>4} 笔 ({pct:>5.1f}%)", flush=True)
-
-    # 🚀 v10 新增：挂单成交分布
-    fill_stats = _calc_fill_stats(trades)
-    if fill_stats:
-        print(f"   📦 挂单成交分布：", flush=True)
-        print(f"      计划档位 {fill_stats['planned_stages_total']} 个 "
-              f"｜ 实际成交 {fill_stats['filled_stages_total']} 个 "
-              f"｜ 成交率 {fill_stats['fill_rate']}%", flush=True)
-        print(f"      全部成交 {fill_stats['full_fill_trades']} 笔 ｜ "
-              f"部分成交 {fill_stats['partial_fill_trades']} 笔", flush=True)
 
     # ---------- 止损空间分布 ----------
     risks = sorted([t["risk_pct"] for t in trades if t.get("risk_pct") is not None])
@@ -587,8 +499,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
     # 离场原因统计
     exit_reasons = Counter()
     tp_upgrade_count = 0
-    # 🚀 v10 新增：因未成交而跳过的信号数
-    skipped_signals = 0
 
     for i in range(start_idx, end_idx + 1):
         current_ts = ts_30m[i]
@@ -623,10 +533,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                 pnl_pct = (exit_price - entry) / entry if direction.startswith("long") else (entry - exit_price) / entry
 
                 risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
-                base_position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
-                # 🚀 v10 新增：按实际成交权重调整仓位
-                actual_weight_pct = pos_info.get("actual_weight_pct", 1.0)
-                position_value = base_position_value * actual_weight_pct
+                position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
 
                 fee_cost = position_value * fee * 2
                 pnl_theoretical = position_value * pnl_pct - fee_cost
@@ -669,13 +576,10 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
                     "coin_amount": coin_amount,
                     "stop_price": pos_info["original_stop"],
                     "risk_pct": risk_pct * 100,
-                    # 🚀 v10 新增：止损来源 + 成交情况
+                    # 🔧 v9+ 新增：止损来源
                     "stop_source": pos_info.get("stop_source", "unknown"),
                     "stop_structural": pos_info.get("stop_structural"),
                     "stop_capital": pos_info.get("stop_capital"),
-                    "planned_stages": pos_info.get("planned_stages", 0),
-                    "filled_stages": pos_info.get("filled_stages", 0),
-                    "actual_weight_pct": actual_weight_pct,
                 })
                 position = None
                 pos_info = None
@@ -689,37 +593,22 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
 
             if res.get("triggered") and res.get("direction") != "spot_warning":
                 entry_plan = res.get("entry_plan")
-                # 🚀 v10 修改：改用 stop 判断（不再依赖 avg_price），并模拟成交
-                if entry_plan and entry_plan.get("stop"):
-                    direction = res["direction"]
-                    current_kline = klines_30m[i]
-
-                    # 🚀 v10 新增：模拟当根 K 线内挂单成交情况
-                    filled_stages, actual_entry, actual_weight_pct = _simulate_fill(
-                        entry_plan, direction, current_kline, cp
-                    )
-
-                    if filled_stages is None:
-                        # 完全没成交，信号作废
-                        skipped_signals += 1
-                        continue
-
-                    position = direction
+                if entry_plan and entry_plan.get("avg_price") and entry_plan.get("stop"):
+                    entry_price = entry_plan["avg_price"]
+                    stop_price = entry_plan["stop"]
+                    position = res["direction"]
                     pos_info = {
                         "direction": position,
-                        "entry": actual_entry,
-                        "stop": entry_plan["stop"],
-                        "original_stop": entry_plan["stop"],
+                        "entry": entry_price,
+                        "stop": stop_price,
+                        "original_stop": stop_price,
                         "tp_stage": 0,
                         "entry_idx": i,
                         "_tp_upgraded": False,
-                        # 🚀 v10 新增字段
+                        # 🔧 v9+ 新增：从 entry_plan 读止损来源（新字段，老版本会返回 None）
                         "stop_source": entry_plan.get("stop_source", "unknown"),
                         "stop_structural": entry_plan.get("stop_structural"),
                         "stop_capital": entry_plan.get("stop_capital"),
-                        "planned_stages": len(entry_plan.get("stages", [])),
-                        "filled_stages": len(filled_stages),
-                        "actual_weight_pct": actual_weight_pct,
                     }
 
     # ---------- 末尾强制平仓 ----------
@@ -729,10 +618,7 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         direction = pos_info["direction"]
         pnl_pct = (cp - entry) / entry if direction.startswith("long") else (entry - cp) / entry
         risk_pct = abs(entry - pos_info["original_stop"]) / entry if entry else 0.02
-        base_position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
-        # 🚀 v10 新增：按实际成交权重调整仓位
-        actual_weight_pct = pos_info.get("actual_weight_pct", 1.0)
-        position_value = base_position_value * actual_weight_pct
+        position_value = min(capital * 0.5, capital * 0.02 / risk_pct) if risk_pct > 0 else capital * 0.5
 
         fee_cost = position_value * fee * 2
         pnl_theoretical = position_value * pnl_pct - fee_cost
@@ -772,20 +658,14 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "coin_amount": coin_amount,
             "stop_price": pos_info["original_stop"],
             "risk_pct": risk_pct * 100,
-            # 🚀 v10 新增字段
+            # 🔧 v9+ 新增
             "stop_source": pos_info.get("stop_source", "unknown"),
             "stop_structural": pos_info.get("stop_structural"),
             "stop_capital": pos_info.get("stop_capital"),
-            "planned_stages": pos_info.get("planned_stages", 0),
-            "filled_stages": pos_info.get("filled_stages", 0),
-            "actual_weight_pct": actual_weight_pct,
         })
 
     # ---------- 离场原因 + 止损空间分布日志 ----------
     _print_exit_stats(symbol, trades, exit_reasons, tp_upgrade_count)
-    # 🚀 v10 新增：打印跳过的信号数
-    if skipped_signals > 0:
-        print(f"   ⏭️  因未成交跳过的信号：{skipped_signals} 个", flush=True)
 
     # ---------- 统计 ----------
     total = len(trades)
@@ -816,9 +696,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
             "exit_reasons": dict(exit_reasons),
             "tp_upgrade_count": tp_upgrade_count,
             "risk_stats": {},
-            # 🚀 v10 新增
-            "fill_stats": {},
-            "skipped_signals": skipped_signals,
         }
 
     # 理论统计
@@ -895,9 +772,6 @@ def run_single(strategy_name, symbol, asset_type, capital, fee, start_ms, end_ms
         "exit_reasons": dict(exit_reasons),
         "tp_upgrade_count": tp_upgrade_count,
         "risk_stats": _calc_risk_stats(trades),
-        # 🚀 v10 新增
-        "fill_stats": _calc_fill_stats(trades),
-        "skipped_signals": skipped_signals,
     }
 
     rating, rating_desc = evaluate_strategy(report)
@@ -968,25 +842,10 @@ def _render_trade_card(t, idx, show_real=True):
     slip = t.get("slippage_usd", 0)
     fund = t.get("funding_usd", 0)
 
-    # 🚀 v10 新增：止损来源
+    # 🔧 v9+ 新增：止损来源
     stop_source = t.get("stop_source", "unknown")
     source_label = STOP_SOURCE_LABEL.get(stop_source, "未知")
     source_color = STOP_SOURCE_COLOR.get(stop_source, "#7f8c8d")
-
-    # 🚀 v10 新增：成交情况
-    planned = t.get("planned_stages", 0)
-    filled = t.get("filled_stages", 0)
-    actual_w = t.get("actual_weight_pct", 1.0)
-    if planned > 0 and filled > 0:
-        if filled == planned:
-            fill_label = f"全成 {filled}/{planned}"
-            fill_color = "#27ae60"
-        else:
-            fill_label = f"部分成交 {filled}/{planned}（实际仓位 {actual_w*100:.0f}%）"
-            fill_color = "#e67e22"
-    else:
-        fill_label = ""
-        fill_color = "#888"
 
     html = (
         f"<div style='border-left:5px solid {accent}; background:{bg}; "
@@ -1008,7 +867,7 @@ def _render_trade_card(t, idx, show_real=True):
     html += f"<span style='color:#888;'>出场</span> <b>${t['exit_price']:.4f}</b>"
     html += f" <span style='color:#888;'>|</span> "
     html += f"<span style='color:#888;'>硬止损</span> <b style='color:#c0392b;'>${stop_price:.4f}</b>"
-    # 🚀 v10 新增：止损来源标签
+    # 🔧 v9+ 新增：止损来源标签
     html += f" <span style='background:{source_color}; color:#fff; padding:1px 6px; border-radius:3px; font-size:11px; font-weight:bold; margin-left:4px;'>{source_label}</span>"
     html += "</div>"
 
@@ -1016,9 +875,6 @@ def _render_trade_card(t, idx, show_real=True):
     html += f"📦 仓位 <b style='color:#555;'>${pos_val:.0f}</b>（10x 保证金 <b style='color:#555;'>${margin:.0f}</b>，{coin_amt:.4f} 个）"
     html += f" &nbsp;·&nbsp; ⏱ 持仓 <b style='color:#555;'>{t['bars_held']}</b> 根"
     html += f" &nbsp;·&nbsp; 🚪 {t.get('exit_reason', '')}"
-    # 🚀 v10 新增：部分成交提示
-    if fill_label:
-        html += f"<br>📊 <span style='color:{fill_color};font-weight:bold;'>{fill_label}</span>"
     html += "</div>"
 
     if show_real:
@@ -1041,7 +897,7 @@ def _render_trades_cards(trades, show_real=True):
         return ""
     sorted_trades = sorted(trades, key=lambda t: t.get("entry_time_ms", 0))
     html = "".join(_render_trade_card(t, i, show_real=show_real) for i, t in enumerate(sorted_trades, 1))
-    # 🚀 v10 修改：图例里加"止损来源"和"挂单成交"
+    # 🔧 v9+ 修改：图例里加"止损来源"
     html += (
         "<p style='color:#888; font-size:11px; margin:10px 0 0 0; line-height:1.6;'>"
         "💡 <b>时间</b>：北京时间（BJT, UTC+8）<br>"
@@ -1051,23 +907,20 @@ def _render_trades_cards(trades, show_real=True):
         "<b>MA10跌破/突破</b>=动态离场｜<b>末尾平仓</b>=区间结束时强制平仓<br>"
         "💡 <b>止损来源</b>：<span style='color:#8e44ad;'>结构位</span>=形态失效点｜"
         "<span style='color:#2980b9;'>资金位</span>=按ATR计算的资金保护｜"
-        "<span style='color:#e67e22;'>1.5%保底</span>=双锚点均过近时强制启用｜"
-        "<span style='color:#7f8c8d;'>兜底2%</span>=异常情况<br>"
-        "💡 <b>挂单成交</b>：只有当根K线触及挂单价才成交；未触及的档位不成交；"
-        "部分成交时按实际权重计算仓位"
+        "<span style='color:#e67e22;'>保底</span>=双锚点均过近时强制启用｜"
+        "<span style='color:#7f8c8d;'>兜底2%</span>=异常情况"
         "</p>"
     )
     return html
 
 
 def _render_consistency_notice(fee, capital):
-    # 🚀 v10 修改：口径说明新增"挂单成交"、"部分成交"、"双锚点止损"、"1.5%保底"、"衍生品数据"五行
     return f"""
 <div style="background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); padding:18px; border-radius:10px; margin:20px 0; border-left:5px solid #1976d2; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
     <h3 style="margin:0 0 12px 0; color:#0d47a1; font-size:17px;">⚖️ 回测口径说明</h3>
     <table style="width:100%; font-size:13px; border-collapse:collapse;">
         <tr style="border-bottom:1px solid #90caf9;">
-            <td style="padding:6px 8px; width:170px; color:#0d47a1; font-weight:bold;">手续费</td>
+            <td style="padding:6px 8px; width:150px; color:#0d47a1; font-weight:bold;">手续费</td>
             <td style="padding:6px 8px;">✅ 双边 <b>{fee*200:.3f}%</b>（开仓+平仓各 {fee*100:.3f}%）</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
@@ -1076,23 +929,15 @@ def _render_consistency_notice(fee, capital):
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">资金费率</td>
-            <td style="padding:6px 8px;">✅ 做空收取 <b>0.01% / 8h</b>；做多支付 <b>0.01% / 8h</b></td>
+            <td style="padding:6px 8px;">✅ 做空收取 <b>0.01% / 8h</b>；做多支付 <b>0.01% / 8h</b>（对称模拟）</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
-            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">挂单成交</td>
-            <td style="padding:6px 8px;">✅ 只有当根K线触及挂单价才成交；未成交档位不计入；<b>完全未成交的信号直接作废</b></td>
-        </tr>
-        <tr style="border-bottom:1px solid #90caf9;">
-            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">部分成交</td>
-            <td style="padding:6px 8px;">✅ 按实际成交权重计算仓位（不补齐到计划仓位）</td>
+            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">硬止损</td>
+            <td style="padding:6px 8px;">✅ 按币种分层 ATR 倍数，用K线最低/最高价触发</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">止损机制</td>
-            <td style="padding:6px 8px;">✅ 双锚点：结构位（形态失效点） + 资金位（ATR 保护），取更早触发的</td>
-        </tr>
-        <tr style="border-bottom:1px solid #90caf9;">
-            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">1.5% 保底</td>
-            <td style="padding:6px 8px;">✅ 双锚点均过近时，强制启用最小止损距离</td>
+            <td style="padding:6px 8px;">✅ 双锚点（结构位 + 资金位），取更早触发的；均过近时启用保底</td>
         </tr>
         <tr style="border-bottom:1px solid #90caf9;">
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">移动止盈</td>
@@ -1102,17 +947,13 @@ def _render_consistency_notice(fee, capital):
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">MA10 离场</td>
             <td style="padding:6px 8px;">✅ 价格盘中跌破/突破 MA10 即离场（按 MA10 价成交）</td>
         </tr>
-        <tr style="border-bottom:1px solid #90caf9;">
-            <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">衍生品数据</td>
-            <td style="padding:6px 8px;">⚠️ 回测含 VWAP；<b>不含 OI 变化和基差</b>（Hyperliquid 无历史数据）</td>
-        </tr>
         <tr>
             <td style="padding:6px 8px; color:#0d47a1; font-weight:bold;">仓位基数</td>
-            <td style="padding:6px 8px;">✅ 固定本金 <b>{capital}U</b>，单笔风险 2%（按实际成交权重调整）</td>
+            <td style="padding:6px 8px;">✅ 固定本金 <b>{capital}U</b>，单笔风险 2%</td>
         </tr>
     </table>
     <p style="margin:12px 0 0 0; padding:8px; background:#fff3cd; border-radius:6px; font-size:13px; color:#856404;">
-    🎯 <b>看什么</b>：请优先看「<b>实盘预估收益</b>」列。同时注意「<b>信号作废数</b>」（挂单未成交的次数）和「<b>部分成交</b>」（仓位变轻）的比例。
+    🎯 <b>看什么</b>：请优先看「<b>实盘预估收益</b>」列 —— 这是扣完手续费、滑点、资金费率后的现实收益。
     </p>
 </div>
 """
@@ -1182,23 +1023,6 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
         html += f" &nbsp;|&nbsp; <span style='color:#666;'>平均持仓 <b>{r['avg_bars_held']}</b> 根30m</span>"
         html += "</div>"
 
-        # 🚀 v10 新增：挂单成交统计
-        fs = r.get("fill_stats") or {}
-        skipped = r.get("skipped_signals", 0)
-        if fs or skipped:
-            html += "<div style='background:#f0f8ff; padding:12px; border-radius:8px; font-size:12.5px; margin-bottom:15px; border-left:4px solid #3498db;'>"
-            html += "<b>📦 挂单成交统计：</b><br>"
-            if fs:
-                html += (f"&nbsp;&nbsp;· 计划档位总计：<b>{fs.get('planned_stages_total', 0)}</b> 个 ｜ "
-                         f"实际成交：<b>{fs.get('filled_stages_total', 0)}</b> 个 ｜ "
-                         f"成交率 <b>{fs.get('fill_rate', 0)}%</b><br>")
-                html += (f"&nbsp;&nbsp;· 全部成交：<b>{fs.get('full_fill_trades', 0)}</b> 笔 ｜ "
-                         f"部分成交：<b>{fs.get('partial_fill_trades', 0)}</b> 笔<br>")
-            if skipped > 0:
-                html += (f"&nbsp;&nbsp;· <span style='color:#e67e22;'>因完全未成交作废的信号：<b>{skipped}</b> 个"
-                         f"（这些信号在实盘中会被跳过）</span><br>")
-            html += "</div>"
-
         # 离场原因分布
         er = r.get("exit_reasons") or {}
         if er:
@@ -1219,7 +1043,7 @@ def _render_single_detail(r, fee=0.0005, capital=10000):
             html += f"&nbsp;&nbsp;· 移动止盈升级次数：<b>{tp_up}</b><br>"
             html += "</div>"
 
-        # 🚀 v10 新增：止损来源分布
+        # 🔧 v9+ 新增：止损来源分布
         source_counter = Counter(t.get("stop_source", "unknown") for t in r["trades"])
         if source_counter:
             html += "<div style='background:#f4ecf7; padding:12px; border-radius:8px; font-size:12.5px; margin-bottom:15px; border-left:4px solid #8e44ad;'>"
@@ -1290,7 +1114,7 @@ def _render_tier_table(reports, tier):
         html += f"<td style='text-align:center;'>{r['rating']}</td>"
         html += "</tr>"
     html += "</table>"
-    html += "<p style='color:#888;font-size:11px;margin-top:6px;'>💡 按实盘预估收益降序排列。「实盘预估」已扣除滑点、资金费率，并模拟挂单成交。</p>"
+    html += "<p style='color:#888;font-size:11px;margin-top:6px;'>💡 按实盘预估收益降序排列。「实盘预估」已扣除滑点和资金费率。</p>"
     return html
 
 
@@ -1327,20 +1151,15 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
         avg_ret_real = sum(r["total_return_real"] for r in with_trades) / len(with_trades)
         avg_win = sum(r["win_rate"] for r in with_trades) / len(with_trades)
         total_trades = sum(r["total_trades"] for r in with_trades)
-        # 🚀 v10 新增：总信号作废数
-        total_skipped = sum(r.get("skipped_signals", 0) for r in all_reports)
     else:
         avg_ret = avg_ret_real = avg_win = total_trades = 0
-        total_skipped = 0
 
     html += "<div style='display:flex;flex-wrap:wrap;gap:12px;margin:15px 0;'>"
-    # 🚀 v10 新增：信号作废数卡片
     cards = [
         ("测试标的", total, "#2c3e50"),
         ("核心/卫星/观察", f"{len(by_tier['core'])}/{len(by_tier['satellite'])}/{len(by_tier['watch'])}", "#3498db"),
         ("有交易", len(with_trades), "#27ae60"),
         ("总交易笔数", total_trades, "#3498db"),
-        ("信号作废数", total_skipped, "#e67e22"),
         ("平均理论收益", f"{avg_ret:+.2f}%", "#e67e22"),
         ("平均实盘预估", f"{avg_ret_real:+.2f}%", "#27ae60" if avg_ret_real > 0 else "#c0392b"),
         ("平均胜率", f"{avg_win:.1f}%", "#9b59b6"),
@@ -1408,8 +1227,7 @@ def main():
     symbol_list, tier_map = resolve_backtest_symbols(cfg, cli_symbols)
 
     print(f"\n{'='*70}", flush=True)
-    # 🚀 v10 修改：标题版本号
-    print(f"📊 参谋长分层回测引擎 v10", flush=True)
+    print(f"📊 参谋长分层回测引擎 v9+", flush=True)
     print(f"   策略：{strategies}", flush=True)
     print(f"   标的数：{len(symbol_list)}", flush=True)
     tier_count = {"core": 0, "satellite": 0, "watch": 0}
@@ -1419,9 +1237,6 @@ def main():
     print(f"   区间：{period_desc}", flush=True)
     print(f"   本金：{capital}U | 手续费：{fee*100}%", flush=True)
     print(f"   数据窗口：30m={BT_BARS_30M}根 / 4h={BT_BARS_4H}根 / 1d={BT_BARS_1D}根", flush=True)
-    # 🚀 v10 新增：启动参数说明
-    print(f"   挂单成交：模拟当根K线触及才成交", flush=True)
-    print(f"   止损机制：双锚点（结构位 / 资金位）+ 1.5%保底", flush=True)
     print(f"{'='*70}\n", flush=True)
 
     all_reports = []
