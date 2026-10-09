@@ -6,6 +6,10 @@ from report_lexicon import trend_cn, momentum_cn, regime_cn
 MAJOR_COINS = {"BTC", "ETH"}
 MID_COINS = {"SOL", "BNB", "XRP", "ADA", "AVAX", "LINK", "DOGE"}
 
+# 🚀 新增：挂单有效性过滤阈值
+# 偏离现价超过此比例的档位会被剔除（防止出现 RLC 那种 -65% 的虚拟挂单）
+MAX_STAGE_DEVIATION = 0.20
+
 
 def get_atr_multiplier(symbol):
     """按币种流动性/波动性返回 ATR 止损倍数。"""
@@ -117,10 +121,20 @@ class V1DefaultStrategy(BaseStrategy):
 
     # ================= 分档入场计划 =================
     def _build_entry_plan(self, symbol, direction, cp, atr, rh, rl, ma10, boll_mid, trigger_type):
+        """
+        生成分档入场计划。
+
+        核心规则：
+        1. 挂单价优先用阻力位（boll_mid / ma10），而非现价 cp
+        2. 所有轨道通用：过滤掉偏离现价超过 MAX_STAGE_DEVIATION 的档位
+        3. 过滤后权重保持不变（总仓变轻），重新计算加权平均价
+        4. 止损统一基于 avg_price + atr_mult × ATR，并加 1.5% 保底距离
+        """
         atr_mult = get_atr_multiplier(symbol)
         stages = []
         note = ""
 
+        # ================= 各轨道挂单构建 =================
         if trigger_type == "long_trend":
             if atr and atr > 0:
                 stages.append({"weight": 40, "type": "limit", "price": cp - 0.5 * atr,
@@ -134,7 +148,6 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 25, "type": "limit", "price": rl * 1.005, "note": "近期低点上方"})
             else:
                 stages.append({"weight": 25, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
-            stop = (rl - atr_mult * atr) if (rl and atr and atr > 0) else None
             note = "底部突破后往往有回踩，限价单接飞刀"
 
         elif trigger_type == "short_reversal":
@@ -143,28 +156,25 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 30, "type": "limit", "price": rh * 1.01, "note": "反弹到前高上方加仓"})
             else:
                 stages.append({"weight": 30, "type": "limit", "price": cp * 1.02, "note": "反弹+2%"})
-            stop = (rh + atr_mult * atr) if (rh and atr and atr > 0) else None
             note = "见顶反转窗口极短，首档必须市价"
 
         elif trigger_type == "short_trend_follow":
+            # 挂单价优先用阻力位，不被 cp 主导
             if boll_mid and boll_mid >= cp:
-                stages.append({"weight": 60, "type": "limit", "price": boll_mid, "note": "限价挂在1H布林中轨"})
-                stages.append({"weight": 40, "type": "limit", "price": boll_mid * 1.015, "note": "布林中轨上方1.5%"})
+                anchor = boll_mid
+                anchor_note = "1H布林中轨"
             elif ma10 and ma10 >= cp:
-                stages.append({"weight": 60, "type": "limit", "price": ma10, "note": "限价挂在30m MA10"})
-                stages.append({"weight": 40, "type": "limit", "price": ma10 * 1.02, "note": "MA10上方2%"})
+                anchor = ma10
+                anchor_note = "30m MA10"
             else:
-                stages.append({"weight": 60, "type": "limit", "price": cp * 1.01, "note": "限价+1%"})
-                stages.append({"weight": 40, "type": "limit", "price": cp * 1.02, "note": "限价+2%"})
-            
-            # 修复：如果 ATR 缺失，强制使用入场价上方2%作为硬止损
-            if boll_mid and atr and atr > 0:
-                stop = boll_mid * 1.02 + atr_mult * atr
-            elif ma10 and atr and atr > 0:
-                stop = ma10 * 1.02 + atr_mult * atr
-            else:
-                # 兜底：基于当前价格上方 2% 作为止损（防止A TR失效导致0.12%的畸形止损）
-                stop = cp * 1.02
+                # 价格已突破上方所有阻力位，只能往上加一点
+                anchor = cp * 1.01
+                anchor_note = "现价上方1%"
+
+            stages.append({"weight": 60, "type": "limit", "price": anchor,
+                           "note": f"限价挂在{anchor_note}"})
+            stages.append({"weight": 40, "type": "limit", "price": anchor * 1.015,
+                           "note": f"{anchor_note}上方1.5%"})
             note = "下跌中继的反弹很磨人，等反弹到阻力位挂限价空单"
 
         elif trigger_type == "long_rebound":
@@ -178,25 +188,50 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 30, "type": "limit", "price": rl * 0.99, "note": "近期低点下方"})
             else:
                 stages.append({"weight": 30, "type": "limit", "price": cp * 0.95, "note": "限价-5%"})
-            stop = (rl - atr_mult * atr) if (rl and atr and atr > 0) else None
             note = "暴跌后往往有二次探底，全部限价，避免抄在半山腰"
 
         elif trigger_type == "long_pullback":
             stages.append({"weight": 60, "type": "market", "price": cp, "note": "已到回踩位，市价占位"})
             if boll_mid:
-                stages.append({"weight": 40, "type": "limit", "price": boll_mid * 0.99, "note": "布林中轨下方1%"})
+                stages.append({"weight": 40, "type": "limit", "price": boll_mid * 0.99,
+                               "note": "布林中轨下方1%"})
             else:
                 stages.append({"weight": 40, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
-            if ma10 and atr and atr > 0:
-                stop = ma10 - atr_mult * atr
-            elif rl and atr and atr > 0:
-                stop = rl - atr_mult * atr
-            else:
-                stop = None
             note = "趋势中回踩到位即入场"
 
+        # ================= 通用保护 1：过滤偏离过大的档位 =================
+        if cp and cp > 0 and stages:
+            valid_stages = [s for s in stages if abs(s["price"] - cp) / cp <= MAX_STAGE_DEVIATION]
+            if valid_stages:
+                stages = valid_stages
+            else:
+                # 极端情况：全部偏离过大，保留最接近现价的一档
+                stages = [min(stages, key=lambda s: abs(s["price"] - cp))]
+
+        # ================= 重新计算加权平均价（权重保持不变 = 总仓变轻） =================
         total_weight = sum(s["weight"] for s in stages)
-        avg_price = sum(s["price"] * s["weight"] for s in stages) / total_weight if total_weight > 0 else cp
+        avg_price = (sum(s["price"] * s["weight"] for s in stages) / total_weight
+                     if total_weight > 0 else cp)
+
+        # ================= 通用保护 2：止损统一基于 avg_price =================
+        is_long = bool(direction and direction.startswith("long"))
+
+        if atr and atr > 0:
+            stop = avg_price - atr_mult * atr if is_long else avg_price + atr_mult * atr
+        else:
+            # ATR 缺失时用固定 2% 兜底
+            stop = avg_price * 0.98 if is_long else avg_price * 1.02
+
+        # 保底：止损距 avg_price 至少 1.5%（防止 ATR 极小时贴脸）
+        if is_long:
+            max_allowed_stop = avg_price * 0.985
+            if stop > max_allowed_stop:
+                stop = max_allowed_stop
+        else:
+            min_allowed_stop = avg_price * 1.015
+            if stop < min_allowed_stop:
+                stop = min_allowed_stop
+
         return {"stages": stages, "avg_price": avg_price, "stop": stop, "note": note}
 
     # ================= 衍生品评分辅助 =================
@@ -477,7 +512,6 @@ class V1DefaultStrategy(BaseStrategy):
             elif not adx_ok_trend_2:
                 adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
                 result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 20"
-            # 修复：增加对 MA10 的偏离限制，防止盲目追空
             elif ma10 and price > ma10 * 1.02:
                 result["track_2"]["details"]["硬条件"] = "❌ 价格偏离MA10超过2%，禁止追空"
             else:
