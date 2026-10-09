@@ -7,12 +7,11 @@ MAJOR_COINS = {"BTC", "ETH"}
 MID_COINS = {"SOL", "BNB", "XRP", "ADA", "AVAX", "LINK", "DOGE"}
 
 # 🚀 新增：挂单有效性过滤阈值
-# 偏离现价超过此比例的档位会被剔除（防止出现 RLC 那种 -65% 的虚拟挂单）
 MAX_STAGE_DEVIATION = 0.20
 
-# 🔧 v10 调整：保底止损从 1.5% 放宽到 2.5%
-# 原 1.5% 太紧，30m 级别正常波动常达 2%，容易被盘中插针扫损
-FLOOR_STOP_PCT = 0.025
+# 🔧 形态失效点止损约束
+MIN_STOP_PCT = 0.015   # 最小止损距离 1.5%
+MAX_STOP_PCT = 0.06    # 最大止损距离 6%（超过则拒绝信号）
 
 
 def get_atr_multiplier(symbol):
@@ -123,20 +122,61 @@ class V1DefaultStrategy(BaseStrategy):
                 ["track_1", "track_4"],
                 "无明确趋势，短线双向操作，条件加严")
 
+    # ================= 形态失效点止损 =================
+    def _calc_structural_stop(self, trigger_type, cp, avg_price, rl, rh, ma10, boll_mid):
+        """
+        根据轨道类型返回形态失效点 + 说明。
+        返回 (stop_price, reason) 或 (None, None) 表示无法计算。
+        """
+        stop = None
+        reason = ""
+
+        if trigger_type == "long_trend":
+            # 底部突破：跌破近期低点=底部破了
+            if rl:
+                stop = rl * 0.995
+                reason = f"跌破近期低点 ${rl:.4f}"
+
+        elif trigger_type == "short_reversal":
+            # 见顶做空：突破前高=见顶失败
+            if rh:
+                stop = rh * 1.005
+                reason = f"突破前高 ${rh:.4f}"
+
+        elif trigger_type == "short_trend_follow":
+            # 顺势做空：突破布林中轨/MA10 上方 2%=反弹过头
+            base = boll_mid if boll_mid else (ma10 if ma10 else avg_price)
+            stop = max(base, avg_price) * 1.02
+            reason = "突破 1H布林中轨 / MA10 上方 2%"
+
+        elif trigger_type == "long_rebound":
+            # 暴跌反弹：跌破暴跌低点=抄底失败
+            if rl:
+                stop = rl * 0.99
+                reason = f"跌破暴跌低点 ${rl:.4f}"
+
+        elif trigger_type == "long_pullback":
+            # 趋势回踩：跌破 MA10=回踩变破位
+            if ma10:
+                stop = ma10 * 0.995
+                reason = f"跌破 30m MA10 ${ma10:.4f}"
+            elif rl:
+                stop = rl * 0.99
+                reason = f"跌破近期低点 ${rl:.4f}"
+
+        return stop, reason
+
     # ================= 分档入场计划 =================
     def _build_entry_plan(self, symbol, direction, cp, atr, rh, rl, ma10, boll_mid, trigger_type):
         """
         生成分档入场计划。
 
-        挂单过滤：偏离现价 > 20% 的档位被剔除（总仓变轻）
-        止损：双锚点机制
-          - 结构位止损：形态失效点（rl / rh / boll_mid / ma10）
-          - 资金位止损：avg_price ± atr_mult × ATR
-          - 做多取更靠上的（max），做空取更靠下的（min）
-          - 2.5% 保底强制生效（🔧 v10 从 1.5% 调整而来）
-        返回的 dict 额外携带 stop_structural / stop_capital / stop_source，供报告展示
+        止损：形态失效点 + 1.5%~6% 约束
+        - 小于 1.5% → 拉到 1.5%
+        - 大于 6% → 返回 None（拒绝信号）
+        - 无形态数据 → 1.5% 兜底
+        止盈：移动止盈（保本 + MA10 跟踪），由回测/实盘执行
         """
-        atr_mult = get_atr_multiplier(symbol)
         stages = []
         note = ""
 
@@ -165,7 +205,6 @@ class V1DefaultStrategy(BaseStrategy):
             note = "见顶反转窗口极短，首档必须市价"
 
         elif trigger_type == "short_trend_follow":
-            # 挂单价优先用阻力位
             if boll_mid and boll_mid >= cp:
                 anchor = boll_mid
                 anchor_note = "1H布林中轨"
@@ -175,7 +214,6 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 anchor = cp * 1.01
                 anchor_note = "现价上方1%"
-
             stages.append({"weight": 60, "type": "limit", "price": anchor,
                            "note": f"限价挂在{anchor_note}"})
             stages.append({"weight": 40, "type": "limit", "price": anchor * 1.015,
@@ -198,13 +236,12 @@ class V1DefaultStrategy(BaseStrategy):
         elif trigger_type == "long_pullback":
             stages.append({"weight": 60, "type": "market", "price": cp, "note": "已到回踩位，市价占位"})
             if boll_mid:
-                stages.append({"weight": 40, "type": "limit", "price": boll_mid * 0.99,
-                               "note": "布林中轨下方1%"})
+                stages.append({"weight": 40, "type": "limit", "price": boll_mid * 0.99, "note": "布林中轨下方1%"})
             else:
                 stages.append({"weight": 40, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
             note = "趋势中回踩到位即入场"
 
-        # ================= 通用保护 1：过滤偏离过大的档位 =================
+        # ================= 挂单过滤：剔除偏离过大的档位 =================
         if cp and cp > 0 and stages:
             valid_stages = [s for s in stages if abs(s["price"] - cp) / cp <= MAX_STAGE_DEVIATION]
             if valid_stages:
@@ -212,87 +249,64 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 stages = [min(stages, key=lambda s: abs(s["price"] - cp))]
 
-        # ================= 重新计算加权平均价（权重保持不变 = 总仓变轻） =================
+        # ================= 计算加权入场价 =================
         total_weight = sum(s["weight"] for s in stages)
         avg_price = (sum(s["price"] * s["weight"] for s in stages) / total_weight
                      if total_weight > 0 else cp)
 
         is_long = bool(direction and direction.startswith("long"))
 
-        # ================= 通用保护 2：双锚点止损 =================
-        # 锚点 1：资金位止损（基于 avg_price + ATR）
-        if atr and atr > 0:
+        # ================= 形态失效点止损 =================
+        stop, stop_reason = self._calc_structural_stop(
+            trigger_type, cp, avg_price, rl, rh, ma10, boll_mid
+        )
+
+        # 无形态数据 → 用 MIN_STOP 兜底
+        if stop is None:
             if is_long:
-                capital_stop = avg_price - atr_mult * atr
+                stop = avg_price * (1 - MIN_STOP_PCT)
             else:
-                capital_stop = avg_price + atr_mult * atr
-        else:
-            capital_stop = avg_price * 0.98 if is_long else avg_price * 1.02
+                stop = avg_price * (1 + MIN_STOP_PCT)
+            stop_reason = "形态数据缺失，用最小止损距离兜底"
 
-        # 锚点 2：结构位止损（形态失效点）
-        structural_stop = None
-        if trigger_type == "long_trend":
-            if rl:
-                structural_stop = rl * 0.995
-        elif trigger_type == "short_reversal":
-            if rh:
-                structural_stop = rh * 1.005
-        elif trigger_type == "short_trend_follow":
-            # 做空：结构位必须在 avg_price 上方
-            base_anchor = boll_mid if boll_mid else (ma10 if ma10 else avg_price)
-            structural_stop = max(base_anchor, avg_price) * 1.02
-        elif trigger_type == "long_rebound":
-            if rl:
-                structural_stop = rl * 0.99
-        elif trigger_type == "long_pullback":
-            if ma10:
-                structural_stop = ma10 * 0.995
-            elif rl:
-                structural_stop = rl * 0.99
+        # 方向校验
+        if is_long and stop >= avg_price:
+            stop = avg_price * (1 - MIN_STOP_PCT)
+            stop_reason = "形态位方向错误，用最小止损距离兜底"
+        if (not is_long) and stop <= avg_price:
+            stop = avg_price * (1 + MIN_STOP_PCT)
+            stop_reason = "形态位方向错误，用最小止损距离兜底"
 
-        # 双锚点取保守值（做多取更靠上；做空取更靠下）
-        valid_candidates = []
-        if is_long:
-            if capital_stop is not None and capital_stop < avg_price:
-                valid_candidates.append(("capital", capital_stop))
-            if structural_stop is not None and structural_stop < avg_price:
-                valid_candidates.append(("structural", structural_stop))
-            if valid_candidates:
-                valid_candidates.sort(key=lambda x: x[1], reverse=True)
-                stop_source, stop = valid_candidates[0]
+        # 计算止损空间
+        stop_pct = abs(avg_price - stop) / avg_price
+
+        # 约束 1：小于 MIN_STOP → 拉到 MIN_STOP
+        if stop_pct < MIN_STOP_PCT:
+            if is_long:
+                stop = avg_price * (1 - MIN_STOP_PCT)
             else:
-                stop, stop_source = avg_price * 0.98, "fallback"
-        else:
-            if capital_stop is not None and capital_stop > avg_price:
-                valid_candidates.append(("capital", capital_stop))
-            if structural_stop is not None and structural_stop > avg_price:
-                valid_candidates.append(("structural", structural_stop))
-            if valid_candidates:
-                valid_candidates.sort(key=lambda x: x[1])
-                stop_source, stop = valid_candidates[0]
-            else:
-                stop, stop_source = avg_price * 1.02, "fallback"
+                stop = avg_price * (1 + MIN_STOP_PCT)
+            stop_reason += f"（已拉到最小 {MIN_STOP_PCT*100:.1f}%）"
+            stop_pct = MIN_STOP_PCT
 
-        # ================= 通用保护 3：2.5% 保底 =================
-        # 🔧 v10 调整：原 1.5% 太紧，30m 级别正常波动常达 2%，容易被扫损
-        if is_long:
-            floor_stop = avg_price * (1 - FLOOR_STOP_PCT)
-            if stop > floor_stop:
-                stop = floor_stop
-                stop_source = "floor"
-        else:
-            floor_stop = avg_price * (1 + FLOOR_STOP_PCT)
-            if stop < floor_stop:
-                stop = floor_stop
-                stop_source = "floor"
+        # 约束 2：大于 MAX_STOP → 拒绝信号
+        if stop_pct > MAX_STOP_PCT:
+            return None
+
+        # ================= 仓位计算（2% 资金管理） =================
+        position_pct = min(0.5, 0.02 / stop_pct)
+
+        # ================= 保本触发距离（1R） =================
+        r_distance = abs(avg_price - stop)
 
         return {
             "stages": stages,
             "avg_price": avg_price,
             "stop": stop,
-            "stop_structural": structural_stop,
-            "stop_capital": capital_stop,
-            "stop_source": stop_source,
+            "stop_pct": stop_pct * 100,
+            "stop_reason": stop_reason,
+            "r_distance": r_distance,
+            "position_pct": position_pct * 100,
             "note": note,
         }
 
@@ -300,7 +314,6 @@ class V1DefaultStrategy(BaseStrategy):
     def _score_track1_derivatives(self, md, price, tr):
         score = 0
         max_score = 0
-
         oi_1h = md.get("oi_change_pct_1h")
         if oi_1h is not None:
             max_score += 1
@@ -322,13 +335,11 @@ class V1DefaultStrategy(BaseStrategy):
                 tr["details"]["8.站上VWAP"] = f"❌ 现价{price:.4f} < VWAP {vwap:.4f}"
         else:
             tr["details"]["8.站上VWAP"] = "⚪ 数据不足"
-
         return score, max_score
 
     def _score_track2a_derivatives(self, md, price, tr):
         score = 0
         max_score = 0
-
         oi_1h = md.get("oi_change_pct_1h")
         if oi_1h is not None:
             max_score += 1
@@ -363,13 +374,11 @@ class V1DefaultStrategy(BaseStrategy):
                 tr["details"]["8.基差/VWAP过热"] = "❌ 未见明显过热"
         else:
             tr["details"]["8.基差/VWAP过热"] = "⚪ 数据不足"
-
         return score, max_score
 
     def _score_track3_derivatives(self, md, price, tr):
         score = 0
         max_score = 0
-
         oi_1h = md.get("oi_change_pct_1h")
         fr = md.get("funding_rate")
         hit = False
@@ -405,13 +414,11 @@ class V1DefaultStrategy(BaseStrategy):
                 tr["details"]["8.远离VWAP超卖"] = f"❌ 偏离VWAP {dev:+.2f}%"
         else:
             tr["details"]["8.远离VWAP超卖"] = "⚪ 数据不足"
-
         return score, max_score
 
     def _score_track4_derivatives(self, md, price, tr):
         score = 0
         max_score = 0
-
         vwap = md.get("vwap_30m")
         if vwap and price:
             max_score += 1
@@ -434,7 +441,6 @@ class V1DefaultStrategy(BaseStrategy):
                 tr["details"]["8.OI稳定"] = f"❌ 4h {oi_4h:+.2f}%（异动）"
         else:
             tr["details"]["8.OI稳定"] = "⚪ 数据不足"
-
         return score, max_score
 
     # ================= 主评估 =================
@@ -519,26 +525,22 @@ class V1DefaultStrategy(BaseStrategy):
             result["track_1"]["details"]["硬条件"] = (
                 f"✅ 1D={trend_cn(trend_1d)} + 4H={trend_cn(trend_4h)} + ADX≥22 + 距高点≥10%"
             )
-
             if price <= rl * 1.05:
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["1.底部区域"] = f"✅ 现价{price}，低点{rl}"
             else:
                 result["track_1"]["details"]["1.底部区域"] = f"❌ 高于低点{rl}的1.05倍"
-
             if ma10 and price > ma10:
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["2.站上30m MA10"] = f"✅ {price} > {ma10:.4f}"
             else:
                 ma10_str = f"{ma10:.4f}" if ma10 else "N/A"
                 result["track_1"]["details"]["2.站上30m MA10"] = f"❌ {price} < {ma10_str}"
-
             if 45 <= rsi <= 65 or (rsi_1h is not None and rsi_1h < 40):
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["3.30m RSI温和 或 1H超卖"] = f"✅ 30m RSI={rsi_str}, 1h RSI={rsi_1h_str}"
             else:
                 result["track_1"]["details"]["3.30m RSI温和 或 1H超卖"] = f"❌ 30m RSI={rsi_str}"
-
             if klines and len(klines) >= 6:
                 avg_vol = sum(k["volume"] for k in klines[-6:-1]) / 5
                 if klines[-1]["volume"] > avg_vol * 1.3 and klines[-1]["close"] > klines[-1]["open"]:
@@ -548,13 +550,11 @@ class V1DefaultStrategy(BaseStrategy):
                     result["track_1"]["details"]["4.30m放量阳线"] = "❌ 未见放量阳线"
             else:
                 result["track_1"]["details"]["4.30m放量阳线"] = "❌ 数据不足"
-
             if kdj_1h.get("j") is not None and kdj_1h["j"] < 20:
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["5.1H KDJ超卖"] = f"✅ J={kdj_j_str}"
             else:
                 result["track_1"]["details"]["5.1H KDJ超卖"] = f"❌ J={kdj_j_str}"
-
             if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None and macd_4h["dif"] > macd_4h["dea"]:
                 result["track_1"]["score"] += 1
                 result["track_1"]["details"]["6.4H MACD金叉"] = "✅ DIF > DEA"
@@ -574,29 +574,24 @@ class V1DefaultStrategy(BaseStrategy):
             elif not adx_ok_trend_2:
                 adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
                 result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 20"
-            # 🔧 v10 调整：删除"价格偏离MA10超过2%，禁止追空"的硬条件
             else:
                 result["track_2"]["hard_ok"] = True
                 result["track_2"]["details"]["硬条件"] = (
                     f"✅ 1D={trend_cn(trend_1d)} + 4H={momentum_cn(momentum_4h)} + ADX≥20"
                 )
-
                 result["track_2"]["details"]["──────── 📌 见顶做空（反转）────────"] = ""
                 rev_score = 0
                 rev_max = 6
-
                 if price >= rh * 0.97:
                     rev_score += 1
                     result["track_2"]["details"]["A1.逼近高点"] = f"✅ {price} 接近 {rh}"
                 else:
                     result["track_2"]["details"]["A1.逼近高点"] = f"❌ 距高{((rh-price)/rh*100):.1f}%"
-
                 if rsi >= 70:
                     rev_score += 1
                     result["track_2"]["details"]["A2.30m RSI超买"] = f"✅ RSI={rsi_str}"
                 else:
                     result["track_2"]["details"]["A2.30m RSI超买"] = f"❌ RSI={rsi_str}"
-
                 if cvd_series and len(cvd_series) >= 10:
                     high_now = max(k["high"] for k in klines[-3:])
                     high_prev = max(k["high"] for k in klines[-10:-3])
@@ -609,7 +604,6 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_2"]["details"]["A3.30m CVD顶背离"] = "❌ 未出现"
                 else:
                     result["track_2"]["details"]["A3.30m CVD顶背离"] = "❌ 数据不足"
-
                 a4_hit = False
                 a4_reasons = []
                 if rsi_1h is not None and rsi_1h >= 70:
@@ -626,36 +620,30 @@ class V1DefaultStrategy(BaseStrategy):
                     result["track_2"]["details"]["A4.1H RSI超买 / 顶背离 / 费率极端"] = f"✅ {' | '.join(a4_reasons)}"
                 else:
                     result["track_2"]["details"]["A4.1H RSI超买 / 顶背离 / 费率极端"] = f"❌ 1h RSI={rsi_1h_str}"
-
                 if kdj_1h.get("j") is not None and kdj_1h["j"] > 100:
                     rev_score += 1
                     result["track_2"]["details"]["A5.1H KDJ超买"] = f"✅ J={kdj_j_str}"
                 else:
                     result["track_2"]["details"]["A5.1H KDJ超买"] = f"❌ J={kdj_j_str}"
-
                 if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None and macd_4h["dif"] < macd_4h["dea"]:
                     rev_score += 1
                     result["track_2"]["details"]["A6.4H MACD死叉"] = "✅ DIF < DEA"
                 else:
                     result["track_2"]["details"]["A6.4H MACD死叉"] = "❌ 4H MACD未死叉"
-
                 d_score_2a, d_max_2a = self._score_track2a_derivatives(market_data, price, result["track_2"])
                 rev_score += d_score_2a
                 rev_max = 6 + d_max_2a
-
                 result["track_2"]["details"]["📊 见顶做空得分"] = f"{rev_score}/{rev_max}"
 
                 result["track_2"]["details"]["──────── 📉 顺势做空（趋势延续）────────"] = ""
                 tf_core = 0
                 tf_aux = 0
                 tf_aux_max = 4
-
                 if ema20_4h and ema50_4h and ema20_4h < ema50_4h:
                     tf_core += 1
                     result["track_2"]["details"]["B1.4H空头结构"] = f"✅ EMA20<EMA50"
                 else:
                     result["track_2"]["details"]["B1.4H空头结构"] = f"❌ EMA20未低于EMA50"
-
                 if boll_mid:
                     dist = (price - boll_mid) / boll_mid
                     if dist >= -0.005:
@@ -665,13 +653,11 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_2"]["details"]["B2.价格接近/高于布林中轨"] = f"❌ 已跌破中轨{dist*100:.1f}%"
                 else:
                     result["track_2"]["details"]["B2.价格接近/高于布林中轨"] = "❌ 数据缺失"
-
                 if rsi_1h is not None and 40 <= rsi_1h <= 60:
                     tf_aux += 1
                     result["track_2"]["details"]["B3.1H RSI中位"] = f"✅ RSI={rsi_1h_str}"
                 else:
                     result["track_2"]["details"]["B3.1H RSI中位"] = f"❌ RSI={rsi_1h_str}"
-
                 if klines and len(klines) >= 2:
                     last, prev = klines[-1], klines[-2]
                     body = abs(last["close"] - last["open"])
@@ -688,19 +674,16 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_2"]["details"]["B4.30m反弹遇阻"] = "❌ 未见遇阻形态"
                 else:
                     result["track_2"]["details"]["B4.30m反弹遇阻"] = "❌ 数据不足"
-
                 if macd_1h.get("dif") is not None and macd_1h.get("dea") is not None and macd_1h["dif"] < macd_1h["dea"]:
                     tf_aux += 1
                     result["track_2"]["details"]["B5.1H MACD空头"] = "✅ DIF < DEA"
                 else:
                     result["track_2"]["details"]["B5.1H MACD空头"] = "❌ 1H MACD未死叉"
-
                 if rsi < 60:
                     tf_aux += 1
                     result["track_2"]["details"]["B6.30m RSI未超买"] = f"✅ RSI={rsi_str}"
                 else:
                     result["track_2"]["details"]["B6.30m RSI未超买"] = f"❌ RSI={rsi_str}"
-
                 oi_1h = market_data.get("oi_change_pct_1h")
                 if oi_1h is not None:
                     tf_aux_max += 1
@@ -711,7 +694,6 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_2"]["details"]["B7.OI 1h增加"] = f"❌ {oi_1h:+.2f}%"
                 else:
                     result["track_2"]["details"]["B7.OI 1h增加"] = "⚪ 数据不足"
-
                 vwap = market_data.get("vwap_30m")
                 if vwap and price:
                     tf_aux_max += 1
@@ -723,7 +705,6 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_2"]["details"]["B8.VWAP遇阻"] = f"❌ 偏离VWAP {dist_vwap*100:+.2f}%"
                 else:
                     result["track_2"]["details"]["B8.VWAP遇阻"] = "⚪ 数据不足"
-
                 result["track_2"]["details"]["📊 顺势做空核心"] = f"{tf_core}/2"
                 result["track_2"]["details"]["📊 顺势做空辅助"] = f"{tf_aux}/{tf_aux_max}"
 
@@ -774,13 +755,11 @@ class V1DefaultStrategy(BaseStrategy):
                     result["track_3"]["details"]["1.大幅回撤"] = f"✅ 回撤{((rh-price)/rh*100):.1f}%"
                 else:
                     result["track_3"]["details"]["1.大幅回撤"] = f"❌ 回撤{((rh-price)/rh*100):.1f}% < 15%"
-
                 if rsi <= 35:
                     result["track_3"]["score"] += 1
                     result["track_3"]["details"]["2.30m RSI超卖"] = f"✅ RSI={rsi_str}"
                 else:
                     result["track_3"]["details"]["2.30m RSI超卖"] = f"❌ RSI={rsi_str}"
-
                 if cvd_series and len(cvd_series) >= 10:
                     low_now = min(k["low"] for k in klines[-3:])
                     low_prev = min(k["low"] for k in klines[-10:-3])
@@ -793,19 +772,16 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_3"]["details"]["3.30m CVD牛背离"] = "❌ 未见底背离"
                 else:
                     result["track_3"]["details"]["3.30m CVD牛背离"] = "❌ 数据不足"
-
                 if (rsi_1h is not None and rsi_1h < 30) or rsi_div == "bullish":
                     result["track_3"]["score"] += 1
                     result["track_3"]["details"]["4.1H RSI超卖或底背离"] = f"✅ 1h RSI={rsi_1h_str}"
                 else:
                     result["track_3"]["details"]["4.1H RSI超卖或底背离"] = f"❌ 1h RSI={rsi_1h_str}"
-
                 if kdj_1h.get("j") is not None and kdj_1h["j"] < 0:
                     result["track_3"]["score"] += 1
                     result["track_3"]["details"]["5.1H KDJ超卖"] = f"✅ J={kdj_j_str}"
                 else:
                     result["track_3"]["details"]["5.1H KDJ超卖"] = f"❌ J={kdj_j_str}"
-
                 if klines and len(klines) >= 2:
                     last = klines[-1]
                     body = abs(last["close"] - last["open"])
@@ -817,7 +793,6 @@ class V1DefaultStrategy(BaseStrategy):
                         result["track_3"]["details"]["6.30m止跌形态"] = "❌ 未见止跌形态"
                 else:
                     result["track_3"]["details"]["6.30m止跌形态"] = "❌ 数据不足"
-
                 d_score_3, d_max_3 = self._score_track3_derivatives(market_data, price, result["track_3"])
                 result["track_3"]["score"] += d_score_3
                 result["track_3"]["max"] = 6 + d_max_3
@@ -833,12 +808,10 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             result["track_4"]["hard_ok"] = True
             result["track_4"]["details"]["硬条件"] = "✅ 1D多头 + 4H多头 + ADX≥18"
-
             tolerance = 0.02
             if atr and price and price > 0:
                 atr_pct = atr / price
                 tolerance = max(0.01, min(atr_pct * 1.5, 0.04))
-
             if boll_mid and abs(price - boll_mid) / boll_mid <= tolerance:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["1.回踩1H布林中轨"] = (
@@ -849,7 +822,6 @@ class V1DefaultStrategy(BaseStrategy):
                 result["track_4"]["details"]["1.回踩1H布林中轨"] = (
                     f"❌ 距中轨{boll_mid_str}较远（当前容差±{tolerance*100:.1f}%）"
                 )
-
             if klines and len(klines) >= 6:
                 avg_vol = sum(k["volume"] for k in klines[-6:-1]) / 5
                 if klines[-1]["volume"] < avg_vol * 0.8:
@@ -859,7 +831,6 @@ class V1DefaultStrategy(BaseStrategy):
                     result["track_4"]["details"]["2.缩量回踩"] = "❌ 未缩量"
             else:
                 result["track_4"]["details"]["2.缩量回踩"] = "❌ 数据不足"
-
             if klines and len(klines) >= 2:
                 last = klines[-1]
                 body = abs(last["close"] - last["open"])
@@ -871,26 +842,22 @@ class V1DefaultStrategy(BaseStrategy):
                     result["track_4"]["details"]["3.30m止跌形态"] = "❌ 未见止跌"
             else:
                 result["track_4"]["details"]["3.30m止跌形态"] = "❌ 数据不足"
-
             if rsi_1h is not None and 40 <= rsi_1h <= 55:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["4.1H RSI健康"] = f"✅ RSI={rsi_1h_str}"
             else:
                 result["track_4"]["details"]["4.1H RSI健康"] = f"❌ RSI={rsi_1h_str}"
-
             if ma10 and price > ma10:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["5.站上30m MA10"] = f"✅ {price} > {ma10:.4f}"
             else:
                 ma10_str = f"{ma10:.4f}" if ma10 else "N/A"
                 result["track_4"]["details"]["5.站上30m MA10"] = f"❌ 未站上MA10({ma10_str})"
-
             if macd_4h.get("dif") is not None and macd_4h.get("dea") is not None and macd_4h["dif"] >= macd_4h["dea"]:
                 result["track_4"]["score"] += 1
                 result["track_4"]["details"]["6.4H MACD健康"] = "✅ DIF >= DEA"
             else:
                 result["track_4"]["details"]["6.4H MACD健康"] = "❌ 4H MACD已死叉"
-
             d_score_4, d_max_4 = self._score_track4_derivatives(market_data, price, result["track_4"])
             result["track_4"]["score"] += d_score_4
             result["track_4"]["max"] = 6 + d_max_4
@@ -931,13 +898,6 @@ class V1DefaultStrategy(BaseStrategy):
             candidates.sort(key=lambda x: (priority_order.get(x[0], 0), x[2]), reverse=True)
 
             winner_dir, winner_track, winner_score, winner_reason = candidates[0]
-            result["triggered"] = True
-            result["direction"] = winner_dir
-            result["reason"] = winner_reason
-
-            if len(candidates) > 1:
-                losers = [f"{c[1]}({c[3]})" for c in candidates[1:]]
-                result["conflict_note"] = f"⚠️ 多轨道冲突！优先选择 [{winner_track}]，被否决：{', '.join(losers)}"
 
             trigger_type_map = {
                 "short": "short_trend_follow" if result["track_2"]["sub_type"] == "trend_follow" else "short_reversal",
@@ -946,13 +906,29 @@ class V1DefaultStrategy(BaseStrategy):
                 "long_trend": "long_trend"
             }
             tt = trigger_type_map.get(winner_dir, "long_trend")
-            result["entry_plan"] = self._build_entry_plan(
+
+            entry_plan = self._build_entry_plan(
                 symbol, winner_dir, price, atr, rh, rl, ma10, boll_mid, tt
             )
 
-            if is_spot_mode and winner_dir == "short":
-                result["direction"] = "spot_warning"
-                result["reason"] = "现货逃顶预警（" + winner_reason + "）"
-                result["entry_plan"] = None
+            # 🔧 止损过宽 → 信号被拒绝
+            if entry_plan is None:
+                result["triggered"] = False
+                result["reason"] = f"{winner_reason}（止损过宽 >6%，信号被拒绝）"
+            else:
+                result["triggered"] = True
+                result["direction"] = winner_dir
+                result["reason"] = winner_reason
+
+                if len(candidates) > 1:
+                    losers = [f"{c[1]}({c[3]})" for c in candidates[1:]]
+                    result["conflict_note"] = f"⚠️ 多轨道冲突！优先选择 [{winner_track}]，被否决：{', '.join(losers)}"
+
+                if is_spot_mode and winner_dir == "short":
+                    result["direction"] = "spot_warning"
+                    result["reason"] = "现货逃顶预警（" + winner_reason + "）"
+                    result["entry_plan"] = None
+                else:
+                    result["entry_plan"] = entry_plan
 
         return result
