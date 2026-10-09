@@ -122,7 +122,7 @@ class V1DefaultStrategy(BaseStrategy):
         note = ""
 
         if trigger_type == "long_trend":
-            if atr:
+            if atr and atr > 0:
                 stages.append({"weight": 40, "type": "limit", "price": cp - 0.5 * atr,
                                "note": f"限价挂在 {cp - 0.5*atr:.4f}，等回踩"})
                 stages.append({"weight": 35, "type": "limit", "price": cp - 1.0 * atr,
@@ -134,7 +134,7 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 25, "type": "limit", "price": rl * 1.005, "note": "近期低点上方"})
             else:
                 stages.append({"weight": 25, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
-            stop = (rl - atr_mult * atr) if (rl and atr) else None
+            stop = (rl - atr_mult * atr) if (rl and atr and atr > 0) else None
             note = "底部突破后往往有回踩，限价单接飞刀"
 
         elif trigger_type == "short_reversal":
@@ -143,7 +143,7 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 30, "type": "limit", "price": rh * 1.01, "note": "反弹到前高上方加仓"})
             else:
                 stages.append({"weight": 30, "type": "limit", "price": cp * 1.02, "note": "反弹+2%"})
-            stop = (rh + atr_mult * atr) if (rh and atr) else None
+            stop = (rh + atr_mult * atr) if (rh and atr and atr > 0) else None
             note = "见顶反转窗口极短，首档必须市价"
 
         elif trigger_type == "short_trend_follow":
@@ -156,16 +156,19 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 stages.append({"weight": 60, "type": "limit", "price": cp * 1.01, "note": "限价+1%"})
                 stages.append({"weight": 40, "type": "limit", "price": cp * 1.02, "note": "限价+2%"})
-            if boll_mid and atr:
+            
+            # 修复：如果 ATR 缺失，强制使用入场价上方2%作为硬止损
+            if boll_mid and atr and atr > 0:
                 stop = boll_mid * 1.02 + atr_mult * atr
-            elif ma10 and atr:
+            elif ma10 and atr and atr > 0:
                 stop = ma10 * 1.02 + atr_mult * atr
             else:
-                stop = cp * 1.05
+                # 兜底：基于当前价格上方 2% 作为止损（防止A TR失效导致0.12%的畸形止损）
+                stop = cp * 1.02
             note = "下跌中继的反弹很磨人，等反弹到阻力位挂限价空单"
 
         elif trigger_type == "long_rebound":
-            if atr:
+            if atr and atr > 0:
                 stages.append({"weight": 35, "type": "limit", "price": cp - 0.5 * atr, "note": "限价-0.5ATR"})
                 stages.append({"weight": 35, "type": "limit", "price": cp - 1.5 * atr, "note": "限价-1.5ATR"})
             else:
@@ -175,7 +178,7 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 30, "type": "limit", "price": rl * 0.99, "note": "近期低点下方"})
             else:
                 stages.append({"weight": 30, "type": "limit", "price": cp * 0.95, "note": "限价-5%"})
-            stop = (rl - atr_mult * atr) if (rl and atr) else None
+            stop = (rl - atr_mult * atr) if (rl and atr and atr > 0) else None
             note = "暴跌后往往有二次探底，全部限价，避免抄在半山腰"
 
         elif trigger_type == "long_pullback":
@@ -184,9 +187,9 @@ class V1DefaultStrategy(BaseStrategy):
                 stages.append({"weight": 40, "type": "limit", "price": boll_mid * 0.99, "note": "布林中轨下方1%"})
             else:
                 stages.append({"weight": 40, "type": "limit", "price": cp * 0.98, "note": "限价-2%"})
-            if ma10 and atr:
+            if ma10 and atr and atr > 0:
                 stop = ma10 - atr_mult * atr
-            elif rl and atr:
+            elif rl and atr and atr > 0:
                 stop = rl - atr_mult * atr
             else:
                 stop = None
@@ -198,14 +201,9 @@ class V1DefaultStrategy(BaseStrategy):
 
     # ================= 衍生品评分辅助 =================
     def _score_track1_derivatives(self, md, price, tr):
-        """
-        轨道1 底部突破：新增 2 条衍生品评分。
-        返回 (得分, max_bonus)
-        """
         score = 0
         max_score = 0
 
-        # 7. OI 变化：1h 内 OI 增加 ≥1%（新多进场）
         oi_1h = md.get("oi_change_pct_1h")
         if oi_1h is not None:
             max_score += 1
@@ -217,7 +215,6 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             tr["details"]["7.OI 1h增幅"] = "⚪ 数据不足"
 
-        # 8. VWAP 站上：机构成本线确认
         vwap = md.get("vwap_30m")
         if vwap and price:
             max_score += 1
@@ -232,13 +229,9 @@ class V1DefaultStrategy(BaseStrategy):
         return score, max_score
 
     def _score_track2a_derivatives(self, md, price, tr):
-        """
-        轨道2A 见顶做空：新增 2 条衍生品评分。
-        """
         score = 0
         max_score = 0
 
-        # 7. OI 减少（价涨 OI 减 = 空头回补，顶部特征）
         oi_1h = md.get("oi_change_pct_1h")
         if oi_1h is not None:
             max_score += 1
@@ -250,7 +243,6 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             tr["details"]["7.OI 1h减幅"] = "⚪ 数据不足"
 
-        # 8. 基差过热 或 远离 VWAP
         basis = md.get("basis_pct")
         vwap = md.get("vwap_30m")
         hit = False
@@ -278,13 +270,9 @@ class V1DefaultStrategy(BaseStrategy):
         return score, max_score
 
     def _score_track3_derivatives(self, md, price, tr):
-        """
-        轨道3 暴跌反弹：新增 2 条衍生品评分。
-        """
         score = 0
         max_score = 0
 
-        # 7. OI 骤降（清算特征）或费率极端负
         oi_1h = md.get("oi_change_pct_1h")
         fr = md.get("funding_rate")
         hit = False
@@ -309,7 +297,6 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             tr["details"]["7.OI骤降/费率极端"] = "⚪ 数据不足"
 
-        # 8. 价格远低于 VWAP（超卖）
         vwap = md.get("vwap_30m")
         if vwap and price:
             max_score += 1
@@ -325,13 +312,9 @@ class V1DefaultStrategy(BaseStrategy):
         return score, max_score
 
     def _score_track4_derivatives(self, md, price, tr):
-        """
-        轨道4 趋势回踩：新增 2 条衍生品评分。
-        """
         score = 0
         max_score = 0
 
-        # 7. VWAP 支撑：价格接近 VWAP（-1% ~ +2%）
         vwap = md.get("vwap_30m")
         if vwap and price:
             max_score += 1
@@ -344,7 +327,6 @@ class V1DefaultStrategy(BaseStrategy):
         else:
             tr["details"]["7.VWAP支撑"] = "⚪ 数据不足"
 
-        # 8. OI 稳定或略增（-1% ~ +3%）
         oi_4h = md.get("oi_change_pct_4h")
         if oi_4h is not None:
             max_score += 1
@@ -482,7 +464,6 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_1"]["details"]["6.4H MACD金叉"] = "❌ 4H MACD未金叉"
 
-            # 🚀 衍生品评分
             d_score, d_max = self._score_track1_derivatives(market_data, price, result["track_1"])
             result["track_1"]["score"] += d_score
             result["track_1"]["max"] = 6 + d_max
@@ -496,6 +477,9 @@ class V1DefaultStrategy(BaseStrategy):
             elif not adx_ok_trend_2:
                 adx_str_local = f"{adx:.1f}" if adx is not None else "N/A"
                 result["track_2"]["details"]["硬条件"] = f"❌ ADX={adx_str_local} < 20"
+            # 修复：增加对 MA10 的偏离限制，防止盲目追空
+            elif ma10 and price > ma10 * 1.02:
+                result["track_2"]["details"]["硬条件"] = "❌ 价格偏离MA10超过2%，禁止追空"
             else:
                 result["track_2"]["hard_ok"] = True
                 result["track_2"]["details"]["硬条件"] = (
@@ -560,7 +544,6 @@ class V1DefaultStrategy(BaseStrategy):
                 else:
                     result["track_2"]["details"]["A6.4H MACD死叉"] = "❌ 4H MACD未死叉"
 
-                # 🚀 见顶做空衍生品评分
                 d_score_2a, d_max_2a = self._score_track2a_derivatives(market_data, price, result["track_2"])
                 rev_score += d_score_2a
                 rev_max = 6 + d_max_2a
@@ -623,7 +606,6 @@ class V1DefaultStrategy(BaseStrategy):
                 else:
                     result["track_2"]["details"]["B6.30m RSI未超买"] = f"❌ RSI={rsi_str}"
 
-                # 🚀 顺势做空新增辅助：B7 OI 增 或 B8 VWAP 遇阻
                 oi_1h = market_data.get("oi_change_pct_1h")
                 if oi_1h is not None:
                     tf_aux_max += 1
@@ -741,7 +723,6 @@ class V1DefaultStrategy(BaseStrategy):
                 else:
                     result["track_3"]["details"]["6.30m止跌形态"] = "❌ 数据不足"
 
-                # 🚀 暴跌反弹衍生品评分
                 d_score_3, d_max_3 = self._score_track3_derivatives(market_data, price, result["track_3"])
                 result["track_3"]["score"] += d_score_3
                 result["track_3"]["max"] = 6 + d_max_3
@@ -815,7 +796,6 @@ class V1DefaultStrategy(BaseStrategy):
             else:
                 result["track_4"]["details"]["6.4H MACD健康"] = "❌ 4H MACD已死叉"
 
-            # 🚀 趋势回踩衍生品评分
             d_score_4, d_max_4 = self._score_track4_derivatives(market_data, price, result["track_4"])
             result["track_4"]["score"] += d_score_4
             result["track_4"]["max"] = 6 + d_max_4
@@ -823,7 +803,6 @@ class V1DefaultStrategy(BaseStrategy):
         # ================= 最终裁决 =================
         candidates = []
 
-        # 轨道2：使用动态阈值
         if result["track_2"]["hard_ok"] and result["track_2"].get("sub_type"):
             t2_max = result["track_2"].get("max", 6)
             t2_score = result["track_2"]["score"]
@@ -831,7 +810,6 @@ class V1DefaultStrategy(BaseStrategy):
             if t2_score >= threshold_2:
                 candidates.append(("short", "track_2", t2_score, result["track_2"]["reason"]))
 
-        # 轨道4：动态阈值
         if result["track_4"]["hard_ok"]:
             t4_max = result["track_4"].get("max", 6)
             t4_score = result["track_4"]["score"]
@@ -839,7 +817,6 @@ class V1DefaultStrategy(BaseStrategy):
             if t4_score >= threshold_4:
                 candidates.append(("long_pullback", "track_4", t4_score, f"趋势回踩 {t4_score}/{t4_max}"))
 
-        # 轨道3：动态阈值
         if result["track_3"]["hard_ok"]:
             t3_max = result["track_3"].get("max", 6)
             t3_score = result["track_3"]["score"]
@@ -847,7 +824,6 @@ class V1DefaultStrategy(BaseStrategy):
             if t3_score >= threshold_3:
                 candidates.append(("long_rebound", "track_3", t3_score, f"暴跌反弹 {t3_score}/{t3_max}"))
 
-        # 轨道1：动态阈值
         if result["track_1"]["hard_ok"]:
             t1_max = result["track_1"].get("max", 6)
             t1_score = result["track_1"]["score"]
