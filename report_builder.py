@@ -65,7 +65,6 @@ def _save_subject_history(history):
 
 
 def _pick_unique_subject(pool):
-    """从标题池里随机抽取，尽量不与历史重复。最多重试 8 次。"""
     history = _load_subject_history()
     for _ in range(8):
         candidate = random.choice(pool)
@@ -114,7 +113,6 @@ CONDITION_EXPLANATIONS = {
     "4.1H RSI健康": "1H RSI在40-55之间",
     "5.站上30m MA10": "短期生命线收复",
     "6.4H MACD健康": "4H MACD未死叉",
-    # 🚀 新增：衍生品评分解释
     "7.OI 1h增幅": "1 小时内未平仓合约增加，说明新多头进场，趋势健康",
     "7.OI 1h减幅": "1 小时内未平仓合约减少，多为空头回补，见顶特征",
     "7.OI骤降/费率极端": "OI 骤降=杠杆清算出清；费率极端负=空头拥挤，反弹前兆",
@@ -139,7 +137,6 @@ SIGNAL_GLOSSARY = {
     "布林中轨": "1H的MA20，趋势回踩的经典支撑位。",
     "ATR": "波动幅度，用于止损和仓位计算。",
     "动量停滞": "MACD柱归零 + ADX低位，主力按兵不动，多数轨道不宜出手。",
-    # 🚀 新增
     "OI": "未平仓合约量。OI 增=新资金入场；OI 减=平仓/清算离场。配合价格可判断趋势真伪。",
     "VWAP": "成交量加权平均价。代表机构当日/近期的真实持仓成本线，是强支撑/阻力。",
     "基差": "合约标记价与指数价的差值。大幅升水=多头情绪过热；贴水=空头情绪过冷。",
@@ -158,7 +155,6 @@ AD_BANNER = """
 # 四、多周期面板
 # ============================================================
 def _fmt_data_range(klines, period_label):
-    """格式化 K 线区间：N根（起始 ~ 结束），时间为北京时间。"""
     if not klines:
         return f"{period_label} N/A"
     try:
@@ -172,10 +168,6 @@ def _fmt_data_range(klines, period_label):
 
 
 def render_multi_tf_panel(md, regime=None):
-    """
-    - 传入 regime 让面板提示与参谋长解读一致。
-    - 表格下方显示"数据区间"，明确各周期实际使用的 K 线范围。
-    """
     trend_1d = md.get("trend_1d")
     trend_4h = md.get("trend_4h")
     rsi_1h = md.get("rsi_1h")
@@ -224,7 +216,6 @@ def render_multi_tf_panel(md, regime=None):
     if boll_1h.get("mid"): h1_signal_list.append(f"BOLL中轨={boll_1h['mid']:.4f}")
     if kdj_1h.get("j") is not None: h1_signal_list.append(f"KDJ J={kdj_1h['j']:.1f}")
     if rsi_div:
-        # 兜底翻译：未知值 → "无背离"，避免英文暴露
         h1_signal_list.append(f"RSI背离={RSI_DIV_MAP.get(rsi_div, '无背离')}")
     h1_signal = " | ".join(h1_signal_list) if h1_signal_list else "N/A"
 
@@ -233,7 +224,6 @@ def render_multi_tf_panel(md, regime=None):
     if adx_30m is not None: m30_signal_list.append(f"ADX={adx_30m:.1f}")
     m30_signal = " | ".join(m30_signal_list) if m30_signal_list else "N/A"
 
-    # 数据区间
     klines_30m = md.get("klines_30m") or []
     klines_1h = md.get("klines_1h") or []
     klines_4h = md.get("klines_4h") or []
@@ -253,14 +243,14 @@ def render_multi_tf_panel(md, regime=None):
     html += f"<tr style='border-bottom:1px solid #eee;'><td style='padding:6px; font-weight:bold;'>⏱️ 30分钟</td><td style='text-align:center;'>{translate_trend(m30_trend)}</td><td style='text-align:center;'>{rsi_30m_str}</td><td style='text-align:center; font-size:12px;'>{m30_signal}</td></tr>"
     html += "</table>"
 
-    # 数据区间行
     html += (
         "<div style='margin-top:10px; padding:8px 10px; background:#fff; "
         "border-left:3px solid #95a5a6; border-radius:0 4px 4px 0; font-size:11.5px; color:#666;'>"
         f"<b>📊 数据区间：</b>{range_30m} ｜ {range_1h} ｜ {range_4h} ｜ {range_1d}"
         "</div>"
     )
-    # 🚀 新增：衍生品数据行
+
+    # 衍生品数据行
     vwap = md.get("vwap_30m")
     basis = md.get("basis_pct")
     oi_1h = md.get("oi_change_pct_1h")
@@ -302,7 +292,6 @@ def render_multi_tf_panel(md, regime=None):
             "</div>"
         )
 
-    # tips 基于 regime（与参谋长解读一致）
     try:
         if regime:
             tips = build_smart_tips(md, regime)
@@ -542,14 +531,20 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
             html += f"总开仓数量 <b>{coin_amount:.4f} 个</b>（按各档位权重分配）。</p>"
 
     if avg_price and stop:
+        # 修复：三段式止盈改用 ATR 计算，防止止损空间畸小时止盈也畸小
+        true_atr = md.get("atr")
+        if not true_atr or true_atr <= 0:
+            true_atr = avg_price * 0.015  # 兜底：1.5% 波动率
+
         if direction and direction.startswith("long"):
-            tp1 = avg_price + abs(avg_price - stop) * 1.0
-            tp2 = avg_price + abs(avg_price - stop) * 2.0
-            tp3 = avg_price + abs(avg_price - stop) * 3.0
+            tp1 = avg_price + true_atr * 1.0
+            tp2 = avg_price + true_atr * 2.0
+            tp3 = avg_price + true_atr * 3.0
         else:
-            tp1 = avg_price - abs(stop - avg_price) * 1.0
-            tp2 = avg_price - abs(stop - avg_price) * 2.0
-            tp3 = avg_price - abs(stop - avg_price) * 3.0
+            tp1 = avg_price - true_atr * 1.0
+            tp2 = avg_price - true_atr * 2.0
+            tp3 = avg_price - true_atr * 3.0
+            
         html += "<p><b>📐 三段式移动止盈：</b><br>"
         html += f"1️⃣ 价格到 <b>${tp1:.4f}</b> 时，止损移至加权成本价 ${avg_price:.4f}<br>"
         html += f"2️⃣ 价格到 <b>${tp2:.4f}</b> 时，止损移至 ${tp1:.4f}<br>"
@@ -594,7 +589,6 @@ def build_hotspot_section(hotspot):
     label = hotspot.get("session_label", "")
     vibe = hotspot.get("session_vibe", "")
 
-    # --- 胶囊标签渲染工具 ---
     def _badge_gainer(items):
         if not items: return "<span style='color:#999;font-size:13px;'>无</span>"
         return "".join([
@@ -639,7 +633,7 @@ def build_hotspot_section(hotspot):
             f"<span style='display:inline-block;background:{bg};color:{color};padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;font-size:13px;font-weight:bold;'>{x['sym']} {prefix} {x['dist']:.2f}%</span>"
             for x in items
         ])
-        
+
     def _badge_oi(items, is_spike=True):
         if not items:
             return "<span style='color:#999;font-size:13px;'>无</span>"
@@ -651,18 +645,15 @@ def build_hotspot_section(hotspot):
             for x in items
         ])
 
-    # --- 组装 HTML ---
     html = (
         "<div style='background: #ffffff; border-radius: 12px; margin-bottom: 25px; "
         "border: 1px solid #e1e8ed; box-shadow: 0 4px 12px rgba(0,0,0,0.05); overflow: hidden;'>"
         
-        # 头部标题区
         "<div style='background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%); padding: 15px 20px;'>"
         f"<h3 style='margin: 0; color: #ffc107; font-size: 18px; letter-spacing: 1px;'>🔥 本期市场焦点（{label}）</h3>"
         f"<p style='margin: 5px 0 0 0; color: #bdc3c7; font-size: 12px;'>{vibe}</p>"
         "</div>"
         
-        # 数据内容区（表格布局，对齐更工整）
         "<div style='padding: 15px 20px;'>"
         "<table style='width:100%; font-size: 13px; border-collapse: collapse;'>"
         
@@ -675,11 +666,11 @@ def build_hotspot_section(hotspot):
         f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#8e44ad; font-weight:bold;'>💥 异动</td><td style='padding: 10px 0;'>{_badge_vol(hotspot.get('volume_spikes', []))}</td></tr>"
         f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#d35400; font-weight:bold;'>💰 费率</td><td style='padding: 10px 0;'>{_badge_fr(hotspot.get('funding_extreme', []))}</td></tr>"
         
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#e74c3c; font-weight:bold;'>📊 OI 骤增</td><td style='padding: 10px 0;'>{_badge_oi(hotspot.get('oi_spikes', []), True)}</td></tr>"
+        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#16a085; font-weight:bold;'>📉 OI 骤降</td><td style='padding: 10px 0;'>{_badge_oi(hotspot.get('oi_drops', []), False)}</td></tr>"
+        
         f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#8e44ad; font-weight:bold;'>⚡ 逼近前高</td><td style='padding: 10px 0;'>{_badge_near(hotspot.get('near_highs', []), True)}</td></tr>"
         f"<tr><td style='padding: 10px 0; color:#2980b9; font-weight:bold;'>🛡️ 逼近前低</td><td style='padding: 10px 0;'>{_badge_near(hotspot.get('near_lows', []), False)}</td></tr>"
-        
-        f"<tr style='border-bottom: 1px dashed #eee;'><td style='padding: 10px 0; color:#e74c3c; font-weight:bold;'>📊 OI 骤增</td><td style='padding: 10px 0;'>{_badge_oi(hotspot.get('oi_spikes', []), True)}</td></tr>"
-        f"<tr><td style='padding: 10px 0; color:#16a085; font-weight:bold;'>📉 OI 骤降</td><td style='padding: 10px 0;'>{_badge_oi(hotspot.get('oi_drops', []), False)}</td></tr>"
         
         "</table></div></div>"
     )
@@ -785,7 +776,6 @@ def build_symbol_block(r):
         </div>
     """
 
-    # 传入 regime 让面板提示与参谋长解读一致
     regime_for_panel = None
     for _sname, _sr in r.get("strategy_results", {}).items():
         if _sr and _sr.get("regime"):
@@ -793,7 +783,6 @@ def build_symbol_block(r):
             break
     html += f"<div style='padding: 0 20px;'>{render_multi_tf_panel(md, regime=regime_for_panel)}</div>"
 
-    # 市场状态面板
     regime = active_sr.get("regime") if active_sr else None
     regime_desc = active_sr.get("regime_desc") if active_sr else None
     momentum_4h = active_sr.get("momentum_4h") if active_sr else None
@@ -814,7 +803,6 @@ def build_symbol_block(r):
             forbidden_str = "、".join([TRACK_NAME_MAP.get(t, t) for t in forbidden])
             html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e74c3c;'>❌ 禁止轨道：{forbidden_str}</p>"
         if active_sr.get("conflict_note"):
-            # 翻译 track_id，避免英文暴露
             _cn_note = translate_track_ids(active_sr["conflict_note"])
             html += f"<p style='margin:5px 0 0 0; font-size:13px; color:#e67e22; font-weight:bold;'>{_cn_note}</p>"
         html += "</div>"
