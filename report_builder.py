@@ -560,7 +560,8 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
             source_label = "✅ 资金位"
             source_desc = "结构位距离过远或已失效，采用资金保护止损"
         elif stop_source == "floor":
-            source_label = "✅ 1.5% 保底"
+            # 🔧 v10 调整：说明从 1.5% 改为 2.5%
+            source_label = "✅ 2.5% 保底"
             source_desc = "双锚点均过近，强制启用最小止损距离保护"
         else:
             source_label = "✅ 兜底 2%"
@@ -571,11 +572,12 @@ def render_entry_plan(entry_plan, direction, cp, cp_str, md):
                  "</div>")
 
     if avg_price and stop:
-        # 三段式止盈：基于加权入场价设置最小 1.5% 空间
+        # 三段式止盈：基于加权入场价设置最小空间
+        # 🔧 v10 调整：最小值从 1.5% 提到 2.5%，与止损保底对齐
         raw_atr = md.get("atr")
         if raw_atr is None or raw_atr <= 0:
             raw_atr = 0
-        min_tp_space = avg_price * 0.015
+        min_tp_space = avg_price * 0.025
         true_atr = max(float(raw_atr), min_tp_space)
 
         if direction and direction.startswith("long"):
