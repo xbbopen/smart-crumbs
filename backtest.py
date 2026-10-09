@@ -934,4 +934,134 @@ def build_tiered_backtest_html(all_reports, strategies, period_desc, fee=0.0005,
     html += f"<p style='color:#666;'><b>生成时间：</b>{now} | <b>请求区间：</b>{period_desc} | <b>策略：</b>{', '.join(strategies)}</p>"
 
     if all_reports:
-        all_starts
+        all_starts = [r.get("backtest_start_ms") for r in all_reports if r.get("backtest_start_ms")]
+        all_ends = [r.get("backtest_end_ms") for r in all_reports if r.get("backtest_end_ms")]
+        if all_starts and all_ends:
+            real_start, real_end = min(all_starts), max(all_ends)
+            days = (real_end - real_start) / 1000 / 86400
+            html += f"<p style='color:#666;'><b>📅 实际数据区间：</b>{fmt_ts(real_start)} ~ {fmt_ts(real_end)}（约 {days:.0f} 天）</p>"
+
+    html += _render_consistency_notice(fee, capital)
+
+    html += "<h3 style='margin-top:30px;'>📈 全局总览</h3>"
+    if with_trades:
+        avg_ret = sum(r["total_return"] for r in with_trades) / len(with_trades)
+        avg_ret_real = sum(r["total_return_real"] for r in with_trades) / len(with_trades)
+        avg_win = sum(r["win_rate"] for r in with_trades) / len(with_trades)
+        total_trades = sum(r["total_trades"] for r in with_trades)
+        total_rejected = sum(r.get("rejected_signals", 0) for r in all_reports)
+    else:
+        avg_ret = avg_ret_real = avg_win = total_trades = total_rejected = 0
+
+    html += "<div style='display:flex;flex-wrap:wrap;gap:12px;margin:15px 0;'>"
+    cards = [
+        ("测试标的", total, "#2c3e50"),
+        ("核心/卫星/观察", f"{len(by_tier['core'])}/{len(by_tier['satellite'])}/{len(by_tier['watch'])}", "#3498db"),
+        ("有交易", len(with_trades), "#27ae60"),
+        ("总交易笔数", total_trades, "#3498db"),
+        ("止损过宽被拒", total_rejected, "#e67e22"),
+        ("平均理论收益", f"{avg_ret:+.2f}%", "#e67e22"),
+        ("平均实盘预估", f"{avg_ret_real:+.2f}%", "#27ae60" if avg_ret_real > 0 else "#c0392b"),
+        ("平均胜率", f"{avg_win:.1f}%", "#9b59b6"),
+    ]
+    for label, value, color in cards:
+        html += f"<div style='flex:1;min-width:130px;background:#fff;padding:15px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.08);text-align:center;'>"
+        html += f"<div style='color:#888;font-size:12px;'>{label}</div>"
+        html += f"<div style='color:{color};font-size:22px;font-weight:900;margin-top:6px;'>{value}</div></div>"
+    html += "</div>"
+
+    for tier in TIER_ORDER:
+        if by_tier[tier]:
+            html += _render_tier_table(by_tier[tier], tier)
+
+    for tier in TIER_ORDER:
+        reports_in_tier = sorted([r for r in by_tier[tier] if r["total_trades"] > 0],
+                                 key=lambda x: x["total_return_real"], reverse=True)
+        if not reports_in_tier: continue
+        tier_icon = TIER_ICON.get(tier, "•")
+        tier_cn = TIER_CN.get(tier, tier)
+        tier_color = TIER_COLOR.get(tier, "#333")
+        html += f"<h3 style='margin-top:40px; color:{tier_color}; border-left:5px solid {tier_color}; padding-left:10px;'>🔍 {tier_icon} {tier_cn} · 详细交易明细</h3>"
+        detail_n = 5 if tier == "watch" else len(reports_in_tier)
+        for r in reports_in_tier[:detail_n]:
+            html += _render_single_detail(r, fee=fee, capital=capital)
+
+    html += "<hr style='margin-top:40px;'><p style='color:#aaa;font-size:11px;text-align:center;'>参谋长分层回测报告 v11 · 仅供交流参考，不构成投资建议</p>"
+    html += "</body></html>"
+    return html
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--strategies", nargs="*")
+    parser.add_argument("--symbols", nargs="*")
+    parser.add_argument("--start_date")
+    parser.add_argument("--end_date")
+    parser.add_argument("--asset_type", default="futures")
+    args = parser.parse_args()
+
+    with open("config/config.json") as f:
+        cfg = json.load(f)
+    d = cfg.get("backtest_defaults", {})
+    strategies = args.strategies or os.environ.get("BT_STRATEGIES", "").split() or d.get("strategies", ["v1_default"])
+    start_date = args.start_date or os.environ.get("BT_START_DATE") or d.get("start_date", "")
+    end_date = args.end_date or os.environ.get("BT_END_DATE") or d.get("end_date", "")
+    asset_type = args.asset_type or os.environ.get("BT_ASSET_TYPE") or "futures"
+    start_ms = parse_date(start_date)
+    end_ms = parse_date(end_date)
+    capital = d.get("initial_capital", 10000)
+    fee = d.get("fee_rate", 0.0005)
+    period_desc = f"{start_date or '全量'} 至 {end_date or '今日'}" if (start_date or end_date) else "全量数据"
+
+    cli_symbols = args.symbols if args.symbols else None
+    symbol_list, tier_map = resolve_backtest_symbols(cfg, cli_symbols)
+
+    print(f"\n{'='*70}", flush=True)
+    print(f"📊 参谋长分层回测引擎 v11", flush=True)
+    print(f"   策略：{strategies}", flush=True)
+    print(f"   标的数：{len(symbol_list)}", flush=True)
+    tier_count = {"core": 0, "satellite": 0, "watch": 0}
+    for s in symbol_list:
+        tier_count[tier_map.get(s, "satellite")] = tier_count.get(tier_map.get(s, "satellite"), 0) + 1
+    print(f"   分层：核心 {tier_count.get('core',0)} / 卫星 {tier_count.get('satellite',0)} / 观察 {tier_count.get('watch',0)}", flush=True)
+    print(f"   区间：{period_desc}", flush=True)
+    print(f"   本金：{capital}U | 手续费：{fee*100}%", flush=True)
+    print(f"   止损：形态失效点（1.5%~6%）", flush=True)
+    print(f"   止盈：盈利 1R 保本 + MA10 跟踪", flush=True)
+    print(f"{'='*70}\n", flush=True)
+
+    all_reports = []
+    t0 = time.time()
+    for strat in strategies:
+        for i, sym in enumerate(symbol_list, 1):
+            tier = tier_map.get(sym, "satellite")
+            print(f"\n[{i}/{len(symbol_list)}] {strat} | {sym} [{tier}] | 已用时 {int(time.time()-t0)}s", flush=True)
+            rep = run_single(strat, sym, asset_type, capital, fee, start_ms, end_ms, tier=tier)
+            if rep:
+                all_reports.append(rep)
+            time.sleep(0.3)
+
+    if not all_reports:
+        print("\n❌ 无有效回测结果", flush=True)
+        sys.exit(1)
+
+    print(f"\n{'='*70}", flush=True)
+    print(f"✅ 回测完成，总用时 {int(time.time()-t0)}s", flush=True)
+    with_trades = sum(1 for r in all_reports if r["total_trades"] > 0)
+    print(f"   有效报告：{len(all_reports)} 份，有交易：{with_trades} 份", flush=True)
+    print(f"{'='*70}", flush=True)
+
+    html = build_tiered_backtest_html(all_reports, strategies, period_desc, fee=fee, capital=capital)
+    now_str = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
+    subject = f"【参谋长分层回测】{now_str} | {len(all_reports)}标的 | {with_trades}个有交易"
+
+    try:
+        send_html_email(subject, html)
+        print("\n📧 回测报告已发送", flush=True)
+    except Exception as e:
+        print(f"\n❌ 邮件发送失败：{e}", flush=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
