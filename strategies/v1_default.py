@@ -124,11 +124,13 @@ class V1DefaultStrategy(BaseStrategy):
         """
         生成分档入场计划。
 
-        核心规则：
-        1. 挂单价优先用阻力位（boll_mid / ma10），而非现价 cp
-        2. 所有轨道通用：过滤掉偏离现价超过 MAX_STAGE_DEVIATION 的档位
-        3. 过滤后权重保持不变（总仓变轻），重新计算加权平均价
-        4. 止损统一基于 avg_price + atr_mult × ATR，并加 1.5% 保底距离
+        挂单过滤：偏离现价 > 20% 的档位被剔除（总仓变轻）
+        止损：双锚点机制
+          - 结构位止损：形态失效点（rl / rh / boll_mid / ma10）
+          - 资金位止损：avg_price ± atr_mult × ATR
+          - 做多取更靠上的（max），做空取更靠下的（min）
+          - 1.5% 保底强制生效
+        返回的 dict 额外携带 stop_structural / stop_capital / stop_source，供报告展示
         """
         atr_mult = get_atr_multiplier(symbol)
         stages = []
@@ -159,7 +161,7 @@ class V1DefaultStrategy(BaseStrategy):
             note = "见顶反转窗口极短，首档必须市价"
 
         elif trigger_type == "short_trend_follow":
-            # 挂单价优先用阻力位，不被 cp 主导
+            # 挂单价优先用阻力位
             if boll_mid and boll_mid >= cp:
                 anchor = boll_mid
                 anchor_note = "1H布林中轨"
@@ -167,7 +169,6 @@ class V1DefaultStrategy(BaseStrategy):
                 anchor = ma10
                 anchor_note = "30m MA10"
             else:
-                # 价格已突破上方所有阻力位，只能往上加一点
                 anchor = cp * 1.01
                 anchor_note = "现价上方1%"
 
@@ -205,7 +206,6 @@ class V1DefaultStrategy(BaseStrategy):
             if valid_stages:
                 stages = valid_stages
             else:
-                # 极端情况：全部偏离过大，保留最接近现价的一档
                 stages = [min(stages, key=lambda s: abs(s["price"] - cp))]
 
         # ================= 重新计算加权平均价（权重保持不变 = 总仓变轻） =================
@@ -213,26 +213,83 @@ class V1DefaultStrategy(BaseStrategy):
         avg_price = (sum(s["price"] * s["weight"] for s in stages) / total_weight
                      if total_weight > 0 else cp)
 
-        # ================= 通用保护 2：止损统一基于 avg_price =================
         is_long = bool(direction and direction.startswith("long"))
 
+        # ================= 通用保护 2：双锚点止损 =================
+        # 锚点 1：资金位止损（基于 avg_price + ATR）
         if atr and atr > 0:
-            stop = avg_price - atr_mult * atr if is_long else avg_price + atr_mult * atr
+            if is_long:
+                capital_stop = avg_price - atr_mult * atr
+            else:
+                capital_stop = avg_price + atr_mult * atr
         else:
-            # ATR 缺失时用固定 2% 兜底
-            stop = avg_price * 0.98 if is_long else avg_price * 1.02
+            capital_stop = avg_price * 0.98 if is_long else avg_price * 1.02
 
-        # 保底：止损距 avg_price 至少 1.5%（防止 ATR 极小时贴脸）
+        # 锚点 2：结构位止损（形态失效点）
+        structural_stop = None
+        if trigger_type == "long_trend":
+            if rl:
+                structural_stop = rl * 0.995
+        elif trigger_type == "short_reversal":
+            if rh:
+                structural_stop = rh * 1.005
+        elif trigger_type == "short_trend_follow":
+            # 做空：结构位必须在 avg_price 上方
+            base_anchor = boll_mid if boll_mid else (ma10 if ma10 else avg_price)
+            structural_stop = max(base_anchor, avg_price) * 1.02
+        elif trigger_type == "long_rebound":
+            if rl:
+                structural_stop = rl * 0.99
+        elif trigger_type == "long_pullback":
+            if ma10:
+                structural_stop = ma10 * 0.995
+            elif rl:
+                structural_stop = rl * 0.99
+
+        # 双锚点取保守值（做多取更靠上；做空取更靠下）
+        valid_candidates = []
         if is_long:
-            max_allowed_stop = avg_price * 0.985
-            if stop > max_allowed_stop:
-                stop = max_allowed_stop
+            if capital_stop is not None and capital_stop < avg_price:
+                valid_candidates.append(("capital", capital_stop))
+            if structural_stop is not None and structural_stop < avg_price:
+                valid_candidates.append(("structural", structural_stop))
+            if valid_candidates:
+                valid_candidates.sort(key=lambda x: x[1], reverse=True)
+                stop_source, stop = valid_candidates[0]
+            else:
+                stop, stop_source = avg_price * 0.98, "fallback"
         else:
-            min_allowed_stop = avg_price * 1.015
-            if stop < min_allowed_stop:
-                stop = min_allowed_stop
+            if capital_stop is not None and capital_stop > avg_price:
+                valid_candidates.append(("capital", capital_stop))
+            if structural_stop is not None and structural_stop > avg_price:
+                valid_candidates.append(("structural", structural_stop))
+            if valid_candidates:
+                valid_candidates.sort(key=lambda x: x[1])
+                stop_source, stop = valid_candidates[0]
+            else:
+                stop, stop_source = avg_price * 1.02, "fallback"
 
-        return {"stages": stages, "avg_price": avg_price, "stop": stop, "note": note}
+        # ================= 通用保护 3：1.5% 保底 =================
+        if is_long:
+            floor_stop = avg_price * 0.985
+            if stop > floor_stop:
+                stop = floor_stop
+                stop_source = "floor"
+        else:
+            floor_stop = avg_price * 1.015
+            if stop < floor_stop:
+                stop = floor_stop
+                stop_source = "floor"
+
+        return {
+            "stages": stages,
+            "avg_price": avg_price,
+            "stop": stop,
+            "stop_structural": structural_stop,
+            "stop_capital": capital_stop,
+            "stop_source": stop_source,
+            "note": note,
+        }
 
     # ================= 衍生品评分辅助 =================
     def _score_track1_derivatives(self, md, price, tr):
