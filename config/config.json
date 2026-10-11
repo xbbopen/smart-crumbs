@@ -24,7 +24,14 @@
     { "symbol": "ADA_USDT", "type": "futures" },
     { "symbol": "PENGU_USDT", "type": "futures" },
     { "symbol": "FIL_USDT", "type": "futures" },
-    { "symbol": "ORCA_USDT", "type": "futures" }
+    { "symbol": "ORCA_USDT", "type": "futures" },
+    { "symbol": "US_USDT", "type": "futures" },
+    { "symbol": "MAGIC_USDT", "type": "futures" }
+    { "symbol": "STRK_USDT", "type": "futures" },
+    { "symbol": "TIA_USDT", "type": "futures" },
+    { "symbol": "LUMIA_USDT", "type": "futures" },
+    { "symbol": "ERA_USDT", "type": "futures" },
+    { "symbol": "CFX_USDT", "type": "futures" }
   ],
 
   "backtest_tiers": {
